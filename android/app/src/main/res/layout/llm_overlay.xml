@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/llmOverlayRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clickable="true"
+    android:focusable="true"
+    android:background="#80000000">
+
+    <!-- Loading card (center) -->
+    <FrameLayout
+        android:id="@+id/loadingCard"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:padding="20dp"
+        android:elevation="6dp">
+
+        <!-- Ultra-minimal: spinner + icon cancel overlayed -->
+        <FrameLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center">
+
+            <ProgressBar
+                android:id="@+id/progress"
+                style="?android:attr/progressBarStyleLarge"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_gravity="center" />
+
+            <Button
+                android:id="@+id/btnCancel"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:minWidth="52dp"
+                android:minHeight="52dp"
+                android:padding="0dp"
+                android:text="✕"
+                android:textSize="20sp"
+                android:textAllCaps="false"
+                android:background="@drawable/cancel_circle"
+                android:textColor="#FFFFFF"
+                android:contentDescription="Cancel"
+                android:layout_gravity="center" />
+        </FrameLayout>
+
+    </FrameLayout>
+
+    <!-- Preview overlay -->
+    <FrameLayout
+        android:id="@+id/previewBox"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:background="#99000000"
+        android:clickable="true"
+        android:focusable="true">
+
+        <!-- Preview card (height will be capped in Kotlin to 60% of screen) -->
+        <LinearLayout
+            android:id="@+id/previewCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginStart="20dp"
+            android:layout_marginEnd="20dp"
+            android:background="@drawable/overlay_card"
+            android:orientation="vertical"
+            android:elevation="10dp"
+            android:padding="0dp">
+
+            <!-- Header -->
+            <LinearLayout
+                android:id="@+id/previewHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="20dp"
+                android:paddingTop="18dp"
+                android:paddingEnd="20dp"
+                android:paddingBottom="12dp">
+
+                <TextView
+                    android:id="@+id/previewTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Scribe Preview"
+                    android:textColor="#111111"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#14000000" />
+
+            <!-- Content (weight-based; scrolls when long; works once card height is set in Kotlin) -->
+            <ScrollView
+                android:id="@+id/previewScroll"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:fillViewport="true"
+                android:overScrollMode="ifContentScrolls"
+                android:scrollbars="vertical"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:id="@+id/previewText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="#1F1F1F"
+                    android:textSize="16sp"
+                    android:lineSpacingExtra="3dp"
+                    android:gravity="start"
+                    android:textAlignment="viewStart" />
+            </ScrollView>
+
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#14000000" />
+
+            <!-- Actions -->
+            <LinearLayout
+                android:id="@+id/previewActions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:paddingStart="12dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnPreviewCancel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:text="Cancel"
+                    android:textAllCaps="false"
+                    android:textSize="14sp"
+                    android:background="@android:color/transparent"
+                    android:textColor="#1A73E8"
+                    android:contentDescription="Do not apply" />
+
+                <Button
+                    android:id="@+id/btnPreviewApply"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:layout_marginStart="8dp"
+                    android:text="Apply"
+                    android:textAllCaps="false"
+                    android:textSize="14sp"
+                    android:background="@drawable/apply_rect"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Context overlay -->
+    <FrameLayout
+        android:id="@+id/contextBox"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:background="#99000000"
+        android:clickable="true"
+        android:focusable="true">
+
+        <LinearLayout
+            android:id="@+id/contextCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginStart="20dp"
+            android:layout_marginEnd="20dp"
+            android:background="@drawable/overlay_card"
+            android:orientation="vertical"
+            android:elevation="10dp"
+            android:padding="0dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="20dp"
+                android:paddingTop="18dp"
+                android:paddingEnd="20dp"
+                android:paddingBottom="12dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Add Context (Optional)"
+                    android:textColor="#111111"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#14000000" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:fillViewport="true"
+                android:overScrollMode="ifContentScrolls"
+                android:scrollbars="vertical"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp">
+
+                <EditText
+                    android:id="@+id/contextInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="120dp"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine|textCapSentences"
+                    android:hint="Example: I’m replying to a client email about a late delivery."
+                    android:textColorHint="#9E9E9E"
+                    android:textColor="#1F1F1F"
+                    android:textSize="16sp"
+                    android:background="@android:color/transparent"
+                    android:padding="0dp" />
+            </ScrollView>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#14000000" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:paddingStart="12dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnContextCancel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:text="Cancel"
+                    android:textAllCaps="false"
+                    android:textSize="14sp"
+                    android:background="@android:color/transparent"
+                    android:textColor="#1A73E8"
+                    android:contentDescription="Skip context" />
+
+                <Button
+                    android:id="@+id/btnContextOk"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:layout_marginStart="8dp"
+                    android:text="Add"
+                    android:textAllCaps="false"
+                    android:textSize="14sp"
+                    android:background="@drawable/apply_rect"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+
+        </LinearLayout>
+    </FrameLayout>
+
+</FrameLayout>
