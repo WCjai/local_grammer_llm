@@ -32,6 +32,19 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <activity
+            android:name=".ProcessTextActivity"
+            android:exported="true"
+            android:theme="@style/ProcessTextTheme"
+            android:taskAffinity=""
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".TypiLikeAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
