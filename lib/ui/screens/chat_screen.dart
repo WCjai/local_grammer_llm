@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:local_grammer_llm/models/chat_message.dart';
 import 'package:local_grammer_llm/services/platform_channel_service.dart';
 import 'package:local_grammer_llm/ui/widgets/suggestions_list.dart';
+import 'package:local_grammer_llm/ui/widgets/app_snackbar.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -27,10 +28,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
 
   void _showNotice(String message) {
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    showAppSnackBar(context, message);
   }
 
   static const Set<String> _reservedKeywords = {

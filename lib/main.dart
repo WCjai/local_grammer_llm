@@ -7,6 +7,7 @@ import 'package:local_grammer_llm/providers/model_provider.dart';
 import 'package:local_grammer_llm/providers/service_provider.dart';
 import 'package:local_grammer_llm/providers/settings_provider.dart';
 import 'package:local_grammer_llm/providers/commands_provider.dart';
+import 'package:local_grammer_llm/providers/theme_provider.dart';
 import 'package:local_grammer_llm/services/platform_channel_service.dart';
 import 'package:local_grammer_llm/services/preferences_service.dart';
 
@@ -24,6 +25,7 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
+        ChangeNotifierProvider(create: (_) => ThemeProvider(prefs)),
         ChangeNotifierProvider(create: (_) => ModelProvider(channel)),
         ChangeNotifierProvider(create: (_) => ServiceProvider(channel)),
         ChangeNotifierProvider(create: (_) => SettingsProvider(channel)),

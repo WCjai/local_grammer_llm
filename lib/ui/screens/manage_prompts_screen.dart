@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:local_grammer_llm/services/platform_channel_service.dart';
+import 'package:local_grammer_llm/ui/widgets/app_snackbar.dart';
 
 class ManagePromptsScreen extends StatefulWidget {
   const ManagePromptsScreen({super.key});
@@ -39,9 +40,7 @@ class _ManagePromptsScreenState extends State<ManagePromptsScreen> {
         _prompts = [];
         _loading = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Load prompts error: $e")),
-      );
+      showAppSnackBar(context, "Load prompts error: $e", type: SnackType.error);
     }
   }
 
@@ -55,9 +54,7 @@ class _ManagePromptsScreenState extends State<ManagePromptsScreen> {
       );
       await _loadPrompts();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Add prompt error: $e")),
-      );
+      showAppSnackBar(context, "Add prompt error: $e", type: SnackType.error);
     }
   }
 
@@ -77,9 +74,7 @@ class _ManagePromptsScreenState extends State<ManagePromptsScreen> {
       );
       await _loadPrompts();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Update prompt error: $e")),
-      );
+      showAppSnackBar(context, "Update prompt error: $e", type: SnackType.error);
     }
   }
 
@@ -119,9 +114,7 @@ class _ManagePromptsScreenState extends State<ManagePromptsScreen> {
       await _channel.deletePrompt(keyword);
       await _loadPrompts();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Delete prompt error: $e")),
-      );
+      showAppSnackBar(context, "Delete prompt error: $e", type: SnackType.error);
     }
   }
 
@@ -181,17 +174,11 @@ class _ManagePromptsScreenState extends State<ManagePromptsScreen> {
               final keyword = keywordCtrl.text.trim().replaceFirst("?", "");
               final prompt = promptCtrl.text.trim();
               if (keyword.isEmpty || prompt.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text("Keyword and prompt are required.")),
-                );
+                showAppSnackBar(context, "Keyword and prompt are required.", type: SnackType.error);
                 return;
               }
               if (allowKeywordEdit && _isBuiltInKeyword(keyword)) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text("That is a default keyword.")),
-                );
+                showAppSnackBar(context, "That is a default keyword.", type: SnackType.error);
                 return;
               }
               Navigator.of(context).pop({

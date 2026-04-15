@@ -378,6 +378,16 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // Pre-warm the ProcessText Flutter engine so text-selection popup opens instantly
+        ioScope.launch {
+            kotlinx.coroutines.delay(2000)
+            withContext(Dispatchers.Main) {
+                try {
+                    (applicationContext as? LocalScribeApp)?.getOrCreateProcessTextEngine()
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     override fun onDestroy() {

@@ -4,6 +4,7 @@ import 'package:local_grammer_llm/providers/model_provider.dart';
 import 'package:local_grammer_llm/providers/service_provider.dart';
 import 'package:local_grammer_llm/providers/settings_provider.dart';
 import 'package:local_grammer_llm/providers/commands_provider.dart';
+import 'package:local_grammer_llm/providers/theme_provider.dart';
 import 'package:local_grammer_llm/ui/screens/chat_screen.dart';
 import 'package:local_grammer_llm/ui/screens/manage_prompts_screen.dart';
 import 'package:local_grammer_llm/ui/screens/demo_screen.dart';
@@ -11,6 +12,7 @@ import 'package:local_grammer_llm/ui/widgets/no_glow_scroll.dart';
 import 'package:local_grammer_llm/ui/widgets/beta_tag.dart';
 import 'package:local_grammer_llm/ui/widgets/command_item.dart';
 import 'package:local_grammer_llm/ui/widgets/command_row.dart';
+import 'package:local_grammer_llm/ui/widgets/app_snackbar.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -53,10 +55,14 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   void _showNotice(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    final type = message.contains('✓') || message.contains('ready')
+        ? SnackType.success
+        : message.toLowerCase().contains('error') ||
+                message.toLowerCase().contains('failed') ||
+                message.toLowerCase().contains('enable')
+            ? SnackType.error
+            : SnackType.info;
+    showAppSnackBar(context, message, type: type);
   }
 
   @override
@@ -65,6 +71,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     final service = context.watch<ServiceProvider>();
     final settings = context.watch<SettingsProvider>();
     final commands = context.watch<CommandsProvider>();
+    final themeProvider = context.watch<ThemeProvider>();
     final busy = model.busy;
 
     const googleBlue = Color(0xFF1A73E8);
@@ -112,15 +119,15 @@ class _DashboardScreenState extends State<DashboardScreen>
         ),
         centerTitle: true,
         actions: [
-          if (model.initInProgress)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12),
-              child: SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+          IconButton(
+            icon: Icon(
+              themeProvider.isDark
+                  ? Icons.light_mode_rounded
+                  : Icons.dark_mode_rounded,
             ),
+            onPressed: themeProvider.toggle,
+            tooltip: themeProvider.isDark ? 'Light mode' : 'Dark mode',
+          ),
         ],
         leading: Builder(
           builder: (ctx) => IconButton(
@@ -188,7 +195,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     ? "Scribe is ready to help"
                     : "Tap to activate Scribe assistant")
                 : "Android Accessibility permission required",
-            style: TextStyle(color: Colors.grey.shade700),
+            style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
           ),
           value: service.serviceEnabled,
           onChanged: busy
@@ -274,9 +281,9 @@ class _DashboardScreenState extends State<DashboardScreen>
           child: ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor:
-                  service.serviceEnabled ? yellow : Colors.grey.shade400,
+                  service.serviceEnabled ? yellow : Theme.of(context).colorScheme.outline,
               foregroundColor:
-                  service.serviceEnabled ? Colors.black : Colors.white,
+                  service.serviceEnabled ? Colors.black : Theme.of(context).colorScheme.onSurface,
             ),
             onPressed: busy
                 ? null
@@ -313,7 +320,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               title: const Text("Show preview"),
               subtitle: Text(
                 "Review output before applying changes",
-                style: TextStyle(color: Colors.grey.shade700),
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
               ),
               value: settings.showPreview,
               onChanged: busy
@@ -326,7 +333,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               title: const Text("Show add context window"),
               subtitle: Text(
                 "Optionally add scenario before processing",
-                style: TextStyle(color: Colors.grey.shade700),
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
               ),
               value: settings.showContext,
               onChanged: busy
@@ -480,22 +487,41 @@ class _DashboardScreenState extends State<DashboardScreen>
                 fontWeight: FontWeight.w600,
               )),
               const SizedBox(height: 8),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: "local", label: Text("Local"), icon: Icon(Icons.smartphone)),
-                  ButtonSegment(value: "best", label: Text("Auto"), icon: Icon(Icons.auto_awesome)),
-                  ButtonSegment(value: "online", label: Text("Cloud"), icon: Icon(Icons.cloud)),
-                ],
-                selected: {settings.apiMode},
-                onSelectionChanged: busy
-                    ? null
-                    : (v) => settings.setApiMode(v.first).catchError((e) {
-                          _showNotice("Mode error: $e");
-                        }),
-                showSelectedIcon: false,
-                style: ButtonStyle(
-                  visualDensity: VisualDensity.compact,
-                ),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final compact = constraints.maxWidth < 320;
+                  return SegmentedButton<String>(
+                    segments: [
+                      ButtonSegment(
+                        value: "local",
+                        label: const Text("Local", softWrap: false),
+                        icon: compact ? null : const Icon(Icons.smartphone),
+                      ),
+                      ButtonSegment(
+                        value: "best",
+                        label: const Text("Auto", softWrap: false),
+                        icon: compact ? null : const Icon(Icons.auto_awesome),
+                      ),
+                      ButtonSegment(
+                        value: "online",
+                        label: const Text("Cloud", softWrap: false),
+                        icon: compact ? null : const Icon(Icons.cloud),
+                      ),
+                    ],
+                    selected: {settings.apiMode},
+                    onSelectionChanged: busy
+                        ? null
+                        : (v) => settings.setApiMode(v.first).catchError((e) {
+                              _showNotice("Mode error: $e");
+                            }),
+                    showSelectedIcon: false,
+                    style: ButtonStyle(
+                      visualDensity: compact
+                          ? VisualDensity.compact
+                          : VisualDensity.standard,
+                    ),
+                  );
+                },
               ),
               const SizedBox(height: 20),
 

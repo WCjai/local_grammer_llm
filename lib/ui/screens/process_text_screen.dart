@@ -1,36 +1,83 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:local_grammer_llm/services/process_text_channel.dart';
 
+/// Notifier that forces ProcessTextScreen rebuild when native pushes new text.
+final _screenKey = ValueNotifier<Key>(UniqueKey());
+
+/// Notifier for dark mode, re-read from prefs on each invocation.
+final _isDarkNotifier = ValueNotifier<bool>(false);
+
+const _kChannel = MethodChannel('process_text');
+
 @pragma('vm:entry-point')
-void processTextMain() => runApp(const ProcessTextApp());
+void processTextMain() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  _isDarkNotifier.value = prefs.getBool('is_dark_mode') ?? false;
+  _kChannel.setMethodCallHandler((call) async {
+    if (call.method == 'onNewText') {
+      // Re-read theme pref each time the popup is triggered
+      await prefs.reload();
+      _isDarkNotifier.value = prefs.getBool('is_dark_mode') ?? false;
+      _screenKey.value = UniqueKey();
+    }
+    return null;
+  });
+  runApp(const ProcessTextApp());
+}
 
 class ProcessTextApp extends StatelessWidget {
   const ProcessTextApp({super.key});
 
+  static const _light = ColorScheme.light(
+    primary: Color(0xFF6C4AD5),
+    onPrimary: Colors.white,
+    secondary: Color(0xFF8E7EE6),
+    onSecondary: Colors.white,
+    tertiary: Color(0xFFC4B7FF),
+    onTertiary: Color(0xFF2A2155),
+    surface: Color(0xFFF7F5FF),
+    onSurface: Color(0xFF1A1633),
+    surfaceContainerHighest: Color(0xFFEEE9FF),
+    outline: Color(0xFFB8B0D9),
+    outlineVariant: Color(0xFFD8D2F0),
+  );
+
+  static const _dark = ColorScheme.dark(
+    primary: Color(0xFF9B80E8),
+    onPrimary: Color(0xFF1A1633),
+    secondary: Color(0xFFB0A0F0),
+    onSecondary: Color(0xFF1A1633),
+    tertiary: Color(0xFF6C4AD5),
+    onTertiary: Color(0xFFE8E4F4),
+    surface: Color(0xFF121020),
+    onSurface: Color(0xFFE8E4F4),
+    surfaceContainerHighest: Color(0xFF252240),
+    outline: Color(0xFF5A5080),
+    outlineVariant: Color(0xFF3D3565),
+  );
+
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.light(
-      primary: const Color(0xFF6C4AD5),
-      onPrimary: Colors.white,
-      secondary: const Color(0xFF8E7EE6),
-      onSecondary: Colors.white,
-      tertiary: const Color(0xFFC4B7FF),
-      onTertiary: const Color(0xFF2A2155),
-      surface: const Color(0xFFF7F5FF),
-      onSurface: const Color(0xFF1A1633),
-      surfaceContainerHighest: const Color(0xFFEEE9FF),
-      outline: const Color(0xFFB8B0D9),
-      outlineVariant: const Color(0xFFD8D2F0),
-    );
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: scheme,
-        scaffoldBackgroundColor: Colors.transparent,
-      ),
-      home: const ProcessTextScreen(),
+    return ValueListenableBuilder<bool>(
+      valueListenable: _isDarkNotifier,
+      builder: (_, isDark, __) {
+        final scheme = isDark ? _dark : _light;
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: scheme,
+            scaffoldBackgroundColor: Colors.transparent,
+          ),
+          home: ValueListenableBuilder<Key>(
+            valueListenable: _screenKey,
+            builder: (_, key, __) => ProcessTextScreen(key: key),
+          ),
+        );
+      },
     );
   }
 }
@@ -42,8 +89,12 @@ class ProcessTextScreen extends StatefulWidget {
   State<ProcessTextScreen> createState() => _ProcessTextScreenState();
 }
 
-class _ProcessTextScreenState extends State<ProcessTextScreen> {
+class _ProcessTextScreenState extends State<ProcessTextScreen>
+    with SingleTickerProviderStateMixin {
   final _channel = ProcessTextChannelService();
+  late final AnimationController _anim;
+  late final Animation<double> _scrimOpacity;
+  late final Animation<Offset> _slideOffset;
 
   String _inputText = '';
   bool _isReadOnly = true;
@@ -58,7 +109,23 @@ class _ProcessTextScreenState extends State<ProcessTextScreen> {
   @override
   void initState() {
     super.initState();
+    _anim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 250),
+    );
+    _scrimOpacity = CurvedAnimation(parent: _anim, curve: Curves.easeOut);
+    _slideOffset = Tween<Offset>(
+      begin: const Offset(0, 1),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _anim, curve: Curves.easeOutCubic));
+    _anim.forward();
     _loadData();
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -116,16 +183,14 @@ class _ProcessTextScreenState extends State<ProcessTextScreen> {
     }
   }
 
-  void _dismiss() {
+  void _dismiss() async {
+    await _anim.reverse();
     _channel.dismiss();
   }
 
   void _copyResult() {
     if (_result == null) return;
     Clipboard.setData(ClipboardData(text: _result!));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Copied to clipboard')),
-    );
   }
 
   void _reset() {
@@ -146,12 +211,18 @@ class _ProcessTextScreenState extends State<ProcessTextScreen> {
       body: GestureDetector(
         onTap: _dismiss,
         behavior: HitTestBehavior.opaque,
-        child: Container(
-          color: Colors.black54,
-          alignment: Alignment.bottomCenter,
-          child: GestureDetector(
-            onTap: () {},
-            child: _buildSheet(context, cs),
+        child: FadeTransition(
+          opacity: _scrimOpacity,
+          child: Container(
+            color: Colors.black54,
+            alignment: Alignment.bottomCenter,
+            child: GestureDetector(
+              onTap: () {},
+              child: SlideTransition(
+                position: _slideOffset,
+                child: _buildSheet(context, cs),
+              ),
+            ),
           ),
         ),
       ),

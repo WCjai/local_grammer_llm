@@ -9,6 +9,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.android.FlutterActivityLaunchConfigs.BackgroundMode
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import android.util.Log
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,6 +46,7 @@ class ProcessTextActivity : FlutterActivity() {
     private var llm: LlmInference? = null
     private var currentModelPath: String? = null
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var methodChannel: MethodChannel? = null
 
     private var inputText: String = ""
     private var isReadOnly: Boolean = true
@@ -55,15 +57,29 @@ class ProcessTextActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
     }
 
-    override fun getDartEntrypointFunctionName(): String = "processTextMain"
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        inputText = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString() ?: ""
+        isReadOnly = intent.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true)
+        methodChannel?.invokeMethod("onNewText", mapOf(
+            "text" to inputText,
+            "readOnly" to isReadOnly
+        ))
+    }
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine {
+        return (applicationContext as LocalScribeApp).getOrCreateProcessTextEngine()
+    }
 
     override fun getBackgroundMode(): BackgroundMode = BackgroundMode.transparent
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        methodChannel = channel
+        channel.setMethodCallHandler { call, result ->
                 when (call.method) {
 
                     "getProcessTextData" -> {
@@ -142,6 +158,17 @@ class ProcessTextActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // Push text to Dart so the cached engine gets the new text
+        channel.invokeMethod("onNewText", mapOf(
+            "text" to inputText,
+            "readOnly" to isReadOnly
+        ))
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        methodChannel?.setMethodCallHandler(null)
+        methodChannel = null
     }
 
     override fun onDestroy() {

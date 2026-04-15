@@ -1,6 +1,8 @@
 package dev.jai.localscribe
 
 import android.accessibilityservice.AccessibilityService
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.PixelFormat
 import android.net.ConnectivityManager
@@ -74,6 +76,7 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private var overlayPreviewScroll: ScrollView? = null
     private var overlayPreviewText: TextView? = null
     private var overlayPreviewCancel: Button? = null
+    private var overlayPreviewCopy: Button? = null
     private var overlayPreviewApply: Button? = null
 
     private var overlayContextBox: View? = null
@@ -642,6 +645,42 @@ $text
     // Overlay UI
     // ------------------------------------------------------------
 
+    private fun applyDarkOverlayTheme(view: View) {
+        // Card backgrounds
+        view.findViewById<View>(R.id.previewCard)?.setBackgroundResource(R.drawable.overlay_card_dark)
+        view.findViewById<View>(R.id.contextCard)?.setBackgroundResource(R.drawable.overlay_card_dark)
+
+        // Title text
+        view.findViewById<TextView>(R.id.previewTitle)?.setTextColor(0xFFE8E4F4.toInt())
+        view.findViewById<TextView>(R.id.contextTitle)?.setTextColor(0xFFE8E4F4.toInt())
+
+        // Body text
+        overlayPreviewText?.setTextColor(0xFFD0CCE4.toInt())
+        overlayContextInput?.setTextColor(0xFFD0CCE4.toInt())
+        overlayContextInput?.setHintTextColor(0xFF6A6090.toInt())
+
+        // Dividers
+        val dividerColor = 0x18FFFFFF
+        view.findViewById<View>(R.id.previewDivider1)?.setBackgroundColor(dividerColor)
+        view.findViewById<View>(R.id.previewDivider2)?.setBackgroundColor(dividerColor)
+        view.findViewById<View>(R.id.contextDivider1)?.setBackgroundColor(dividerColor)
+        view.findViewById<View>(R.id.contextDivider2)?.setBackgroundColor(dividerColor)
+
+        // Ghost buttons
+        view.findViewById<Button>(R.id.btnPreviewCancel)?.apply {
+            setBackgroundResource(R.drawable.ghost_rect_dark)
+            setTextColor(0xFF9B80E8.toInt())
+        }
+        view.findViewById<Button>(R.id.btnPreviewCopy)?.apply {
+            setBackgroundResource(R.drawable.ghost_rect_dark)
+            setTextColor(0xFF9B80E8.toInt())
+        }
+        view.findViewById<Button>(R.id.btnContextCancel)?.apply {
+            setBackgroundResource(R.drawable.ghost_rect_dark)
+            setTextColor(0xFF9B80E8.toInt())
+        }
+    }
+
     private fun showOverlay(onCancel: () -> Unit) {
         if (overlayView != null) return
 
@@ -657,6 +696,7 @@ $text
 
         overlayPreviewText = view.findViewById(R.id.previewText)
         overlayPreviewCancel = view.findViewById(R.id.btnPreviewCancel)
+        overlayPreviewCopy = view.findViewById(R.id.btnPreviewCopy)
         overlayPreviewApply = view.findViewById(R.id.btnPreviewApply)
 
         overlayContextBox = view.findViewById(R.id.contextBox)
@@ -666,6 +706,12 @@ $text
         overlayContextOk = view.findViewById(R.id.btnContextOk)
 
         overlayCancelButton?.setOnClickListener { onCancel() }
+
+        // Apply dark mode theming if enabled
+        val flutterPrefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        if (flutterPrefs.getBoolean("flutter.is_dark_mode", false)) {
+            applyDarkOverlayTheme(view)
+        }
 
         // Keep your existing sizing behavior
         scaleLoadingUiPercent()
@@ -706,6 +752,7 @@ $text
         overlayPreviewScroll = null
         overlayPreviewText = null
         overlayPreviewCancel = null
+        overlayPreviewCopy = null
         overlayPreviewApply = null
 
         overlayContextBox = null
@@ -730,6 +777,14 @@ $text
         capPreviewToTrue20Percent()
 
         overlayPreviewCancel?.setOnClickListener { onCancel() }
+        overlayPreviewCopy?.setOnClickListener {
+            val text = overlayPreviewText?.text?.toString().orEmpty()
+            if (text.isNotEmpty()) {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("Local Scribe", text))
+                Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+            }
+        }
         overlayPreviewApply?.setOnClickListener { onApply() }
     }
 
