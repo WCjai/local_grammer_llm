@@ -747,7 +747,15 @@ class MainActivity : FlutterActivity() {
         val contentObj = first.optJSONObject("content") ?: return ""
         val partsArr = contentObj.optJSONArray("parts") ?: return ""
         if (partsArr.length() == 0) return ""
-        return partsArr.getJSONObject(0).optString("text", "")
+        // Skip parts with "thought":true (Gemma 4 / thinking models emit reasoning chunks)
+        return buildString {
+            for (i in 0 until partsArr.length()) {
+                val part = partsArr.getJSONObject(i)
+                if (!part.optBoolean("thought", false)) {
+                    append(part.optString("text", ""))
+                }
+            }
+        }.trim()
     }
 
     private fun handlePickResult(uri: Uri?) {

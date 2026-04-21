@@ -525,7 +525,15 @@ $text
             val contentObj = first.optJSONObject("content") ?: return@withContext ""
             val partsArr = contentObj.optJSONArray("parts") ?: return@withContext ""
             if (partsArr.length() == 0) return@withContext ""
-            return@withContext partsArr.getJSONObject(0).optString("text", "")
+            // Skip parts with "thought":true (Gemma 4 / thinking models emit reasoning chunks)
+            return@withContext buildString {
+                for (i in 0 until partsArr.length()) {
+                    val part = partsArr.getJSONObject(i)
+                    if (!part.optBoolean("thought", false)) {
+                        append(part.optString("text", ""))
+                    }
+                }
+            }.trim()
         }
 
     // ------------------------------------------------------------
