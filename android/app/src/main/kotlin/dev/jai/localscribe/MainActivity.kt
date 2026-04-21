@@ -29,14 +29,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
-
 class MainActivity : FlutterActivity() {
 
     private val CHANNEL = "local_llm"
     private val PROGRESS_CHANNEL = "local_llm_progress"
-    private var llm: LlmInference? = null
+    private var llm: LocalLlm? = null
     private var initInProgress = false
     private val PREFS_NAME = "local_llm_prefs"
     private val KEY_MODEL_PATH = "model_path"
@@ -651,10 +648,10 @@ class MainActivity : FlutterActivity() {
         val engine = ensureLlmReady()
             ?: throw IllegalStateException("Model not initialized. Pick a model first.")
         ensurePromptFits(engine, prompt)
-        return engine.generateResponse(prompt)
+        return engine.generate(prompt)
     }
 
-    private fun ensurePromptFits(engine: LlmInference, prompt: String) {
+    private fun ensurePromptFits(engine: LocalLlm, prompt: String) {
         val maxInputTokens = (getMaxTokens() - getOutputTokens()).coerceAtLeast(1)
         val tokens = engine.sizeInTokens(prompt)
         if (tokens <= maxInputTokens) return
@@ -665,21 +662,17 @@ class MainActivity : FlutterActivity() {
     }
 
     @Synchronized
-    private fun ensureLlmReady(): LlmInference? {
+    private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
         if (llm != null && currentModelPath == path) return llm
         return try {
             if (!File(path).exists()) return null
             llm?.close()
-            val options = LlmInferenceOptions.builder()
-                .setModelPath(path)
-                .setMaxTokens(getMaxTokens())
-                .setMaxTopK(100)
-                .build()
-            llm = LlmInference.createFromOptions(applicationContext, options)
+            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens())
             currentModelPath = path
             llm
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
             llm = null
             currentModelPath = null
             null

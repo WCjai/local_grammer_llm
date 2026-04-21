@@ -22,8 +22,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
@@ -38,7 +36,7 @@ class QuotaExhaustedException(message: String) : IOException(message)
 class TypiLikeAccessibilityService : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var llm: LlmInference? = null
+    private var llm: LocalLlm? = null
 
     // ---- prefs ----
     private val PREFS_NAME = "local_llm_prefs"
@@ -450,10 +448,10 @@ $text
     private fun generateLocal(prompt: String): String {
         val engine = ensureLlmReady() ?: throw IllegalStateException("LLM not ready")
         ensurePromptFits(engine, prompt)
-        return engine.generateResponse(prompt)
+        return engine.generate(prompt)
     }
 
-    private fun ensurePromptFits(engine: LlmInference, prompt: String) {
+    private fun ensurePromptFits(engine: LocalLlm, prompt: String) {
         val maxInputTokens = (getMaxTokens() - getOutputTokens()).coerceAtLeast(1)
         val tokens = engine.sizeInTokens(prompt)
         if (tokens <= maxInputTokens) return
@@ -534,7 +532,7 @@ $text
     // LLM init (model-path validation + reuse)
     // ------------------------------------------------------------
 
-    private fun ensureLlmReady(): LlmInference? {
+    private fun ensureLlmReady(): LocalLlm? {
         val modelPath = getSavedModelPath()
 
         if (!File(modelPath).exists()) {
@@ -548,12 +546,7 @@ $text
 
         return try {
             llm?.close()
-            val options = LlmInferenceOptions.builder()
-                .setModelPath(modelPath)
-                .setMaxTokens(getMaxTokens())
-                .setMaxTopK(100)
-                .build()
-            llm = LlmInference.createFromOptions(applicationContext, options)
+            llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens())
             currentModelPath = modelPath
             llm
         } catch (e: Exception) {

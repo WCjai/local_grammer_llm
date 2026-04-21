@@ -9,3 +9,7 @@
 
 # Keep MediaPipe GenAI classes
 -keep class com.google.mediapipe.** { *; }
+
+# Keep LiteRT-LM classes
+-keep class com.google.ai.edge.litertlm.** { *; }
+-dontwarn com.google.ai.edge.litertlm.**

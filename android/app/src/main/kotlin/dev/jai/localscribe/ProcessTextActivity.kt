@@ -20,9 +20,6 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
-
 class ProcessTextActivity : FlutterActivity() {
 
     private val CHANNEL = "process_text"
@@ -43,7 +40,7 @@ class ProcessTextActivity : FlutterActivity() {
     private val DEFAULT_MAX_TOKENS = 512
     private val DEFAULT_OUTPUT_TOKENS = 128
 
-    private var llm: LlmInference? = null
+    private var llm: LocalLlm? = null
     private var currentModelPath: String? = null
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var methodChannel: MethodChannel? = null
@@ -334,7 +331,7 @@ $text
                 "Input too long for model (tokens=$tokens, maxInput=$maxInputTokens)"
             )
         }
-        return engine.generateResponse(prompt)
+        return engine.generate(prompt)
     }
 
     private suspend fun tryOnlineThenLocal(prompt: String, jsonMode: Boolean = false): String {
@@ -393,21 +390,17 @@ $text
 
     // ---- LLM init ----
 
-    private fun ensureLlmReady(): LlmInference? {
+    private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
         if (!File(path).exists()) { llm = null; currentModelPath = null; return null }
         if (llm != null && currentModelPath == path) return llm
         return try {
             llm?.close()
-            val options = LlmInferenceOptions.builder()
-                .setModelPath(path)
-                .setMaxTokens(getMaxTokens())
-                .setMaxTopK(100)
-                .build()
-            llm = LlmInference.createFromOptions(applicationContext, options)
+            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens())
             currentModelPath = path
             llm
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
             llm = null; currentModelPath = null; null
         }
     }
