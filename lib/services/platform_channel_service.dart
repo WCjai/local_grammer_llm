@@ -125,6 +125,16 @@ class LlmChannelService {
     await _channel.invokeMethod<bool>("setOutputTokens", {"value": value});
   }
 
+  // ── Vision ──
+
+  Future<bool> getModelSupportsVision() async {
+    return await _channel.invokeMethod<bool>("getModelSupportsVision") ?? false;
+  }
+
+  Future<void> setModelSupportsVision(bool enabled) async {
+    await _channel.invokeMethod<bool>("setModelSupportsVision", {"enabled": enabled});
+  }
+
   // ── Generation ──
 
   Future<String?> generate(String prompt) async {

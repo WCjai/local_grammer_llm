@@ -736,6 +736,27 @@ class _DashboardScreenState extends State<DashboardScreen>
                       onChanged: (v) => settings.setOutputTokens(v),
                       theme: theme,
                     ),
+                    const Divider(height: 24),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        "Model supports image processing?",
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                      subtitle: Text(
+                        "Enable to allow attaching screenshots to prompts. Turn on only if your local model accepts image input.",
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      value: settings.modelSupportsVision,
+                      onChanged: (busy || !isLocal)
+                          ? null
+                          : (v) => settings.setModelSupportsVision(v).catchError((e) {
+                                _showNotice("Error: $e");
+                              }),
+                    ),
                   ],
                 ),
               ),

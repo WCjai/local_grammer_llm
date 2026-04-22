@@ -372,6 +372,28 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
 
+                    "getModelSupportsVision" -> {
+                        val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
+                        val supported = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
+                        result.success(supported)
+                    }
+
+                    "setModelSupportsVision" -> {
+                        val enabled = call.argument<Boolean>("enabled")
+                        if (enabled == null) {
+                            result.error("BAD_ARGS", "enabled is required", null)
+                            return@setMethodCallHandler
+                        }
+                        val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
+                        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit().putBoolean(KEY_MODEL_SUPPORTS_VISION, enabled).apply()
+                        // Reset the cached LLM so next inference picks up the new flag
+                        llm?.close()
+                        llm = null
+                        result.success(true)
+                    }
+
                     else -> result.notImplemented()
                 }
             }

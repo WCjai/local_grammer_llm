@@ -4,10 +4,15 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.os.Bundle
+import android.util.Base64
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -17,6 +22,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
@@ -25,6 +32,7 @@ import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -34,6 +42,21 @@ import android.widget.Toast
 class QuotaExhaustedException(message: String) : IOException(message)
 
 class TypiLikeAccessibilityService : AccessibilityService() {
+
+    companion object {
+        /**
+         * Set just before [CropActivity] is launched. CropActivity completes this deferred
+         * with the crop file path (or null on cancel). Using a companion object allows the
+         * crop activity (running in the same process) to communicate back to this service
+         * without needing startActivityForResult (which AccessibilityService doesn't support).
+         */
+        @Volatile
+        var pendingCropDeferred: CompletableDeferred<String?>? = null
+
+        /** Live service instance — set in [onServiceConnected], cleared in [onUnbind]. */
+        @Volatile
+        var instance: TypiLikeAccessibilityService? = null
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var llm: LocalLlm? = null
@@ -50,6 +73,10 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private val KEY_API_MODEL = "api_model"
     private val KEY_MAX_TOKENS = "max_tokens"
     private val KEY_OUTPUT_TOKENS = "output_tokens"
+    private val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
+
+    /** Gemini API models that don't accept images natively; auto-promote to gemini-2.5-flash for multimodal. */
+    private val NON_VISION_GEMINI_MODELS = setOf("gemma-3n-e2b-it", "gemma-3n-e4b-it")
 
     private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.task"
     private val DEFAULT_API_MODE = "local"
@@ -83,6 +110,19 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private var overlayContextCancel: Button? = null
     private var overlayContextOk: Button? = null
 
+    // ---- screenshot attachment views ----
+    private var overlayBtnAttachScreenshot: ImageButton? = null
+    private var overlayAttachedThumbWrap: View? = null
+    private var overlayAttachedThumb: ImageView? = null
+    private var overlayBtnDetachScreenshot: ImageButton? = null
+
+    /** Persists across overlay show/hide so the pipeline can pick it up. */
+    private var attachedScreenshotPath: String? = null
+    /** Saved so we can re-add the overlay view to WM after it was detached for screenshot. */
+    private var overlayLayoutParams: WindowManager.LayoutParams? = null
+    /** Running crop capture coroutine — cancelled when overlay is dismissed. */
+    private var captureJob: Job? = null
+
     private val wm by lazy { getSystemService(Context.WINDOW_SERVICE) as WindowManager }
 
     // generation control
@@ -95,6 +135,7 @@ class TypiLikeAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        instance = this
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -157,16 +198,21 @@ class TypiLikeAccessibilityService : AccessibilityService() {
                     return@launch
                 }
 
-                // Context UI (context only)
+                // Context UI (text + optional screenshot)
                 var contextText = ""
-                if (isShowContextEnabled() && parsed.command != "scribe") {
+                var contextImagePath: String? = null
+                if (isShowContextEnabled()) {
                     val ctx = awaitContextInput(myGenId)
-                    if (ctx.include) contextText = ctx.text
+                    if (ctx.include) {
+                        contextText = ctx.text
+                        contextImagePath = ctx.imagePath
+                    }
                     withContext(Dispatchers.Main) { showLoadingUi() }
                 }
 
+                val hasImage = contextImagePath != null
                 val finalPrompt = if (parsed.command == "scribe") {
-                    buildScribePrompt(parsed.before.trimEnd(), contextText)
+                    buildScribePrompt(parsed.before.trimEnd(), contextText, hasImage)
                 } else {
                     val customTask = getCustomTaskIfAny(parsed.command)
                     val task = customTask ?: mapCommandToTask(parsed.command, parsed.arg)
@@ -175,12 +221,14 @@ class TypiLikeAccessibilityService : AccessibilityService() {
                     buildTaggedPrompt(
                         task = task,
                         text = parsed.before.trimEnd(),
-                        context = contextText
+                        context = contextText,
+                        hasImage = hasImage,
                     )
                 }
 
                 val isScribe = parsed.command == "scribe"
-                val raw = withTimeout(20_000) { generateAccordingToMode(finalPrompt, jsonMode = !isScribe) }
+                val timeoutMs = if (contextImagePath != null) 120_000L else 20_000L
+                val raw = withTimeout(timeoutMs) { generateAccordingToMode(finalPrompt, jsonMode = !isScribe, imagePath = contextImagePath) }
 
                 val resultText = if (isScribe) {
                     removeThinkOnly(raw).trim()
@@ -266,7 +314,13 @@ class TypiLikeAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        instance = null
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
+        instance = null
         hideOverlay()
         try { llm?.close() } catch (_: Exception) {}
         llm = null
@@ -278,18 +332,37 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     // Prompt system (TAG-DELIMITED INPUT + JSON OUTPUT)
     // ------------------------------------------------------------
 
-    private fun buildTaggedPrompt(task: String, text: String, context: String?): String {
+    private fun buildTaggedPrompt(task: String, text: String, context: String?, hasImage: Boolean = false): String {
         val ctx = context?.trim().orEmpty()
 
-        val rules = """
-Keep the same language as the input unless the task says otherwise.
-Keep the SAME point of view and pronouns (do NOT change I/you/She/He/they).
-Preserve the original meaning and intent exactly.
-Do not add new facts or remove unique details.
-keep names, numbers,dates and places unchanged.
-Do not mention the task, rules, or context in the output.
-Output only the final answer (no explanations, no quotes, no formatting).
-""".trimIndent()
+        val contextSection = when {
+            ctx.isNotBlank() -> """
+[CONTEXT]
+$ctx
+[/CONTEXT]"""
+            else -> ""
+        }
+
+        val imageSection = if (hasImage) """
+[IMAGE_CONTEXT]
+A screenshot is attached. Use it as visual reference to understand the subject matter, identify key details, and improve the quality of the output. The image and the text below refer to the same topic.
+[/IMAGE_CONTEXT]""" else ""
+
+        val rules = buildString {
+            appendLine("Keep the same language as the input unless the task says otherwise.")
+            appendLine("Keep the SAME point of view and pronouns (do NOT change I/you/She/He/they).")
+            appendLine("Preserve the original meaning and intent exactly.")
+            appendLine("Do not add new facts or remove unique details.")
+            appendLine("Keep names, numbers, dates and places unchanged.")
+            appendLine("Do not mention the task, rules, or context in the output.")
+            if (hasImage && ctx.isNotBlank())
+                appendLine("The screenshot and the context text together form the background — use both to inform the task.")
+            else if (hasImage)
+                appendLine("Use insights from the attached screenshot to inform the task.")
+            else if (ctx.isNotBlank())
+                appendLine("Use the provided context to inform the task.")
+            append("Output only the final answer (no explanations, no quotes, no formatting).")
+        }.trimEnd()
 
         return """
 You are a writing engine.
@@ -303,11 +376,8 @@ If you cannot comply, return: {"output":""}
 [TASK]
 $task
 [/TASK]
-
-[CONTEXT]
-${if (ctx.isBlank()) "(none)" else ctx}
-[/CONTEXT]
-
+$contextSection
+$imageSection
 [RULES]
 $rules
 [/RULES]
@@ -318,12 +388,20 @@ $text
 """.trimIndent()
     }
 
-    private fun buildScribePrompt(text: String, context: String?): String {
+    private fun buildScribePrompt(text: String, context: String?, hasImage: Boolean = false): String {
         val ctx = context?.trim().orEmpty()
-        return if (ctx.isBlank()) {
-            "Respond in the same language as the input. Provide only the final answer. No explanations. Input: \"$text\""
-        } else {
-            "Respond in the same language as the input. Use this context: \"$ctx\". Provide only the final answer. No explanations. Input: \"$text\""
+        val hasCtx = ctx.isNotBlank()
+
+        return buildString {
+            append("Respond in the same language as the input. Provide only the final answer. No explanations.")
+            if (hasCtx && hasImage) {
+                append(" The following context and the attached screenshot both provide background — use them together: \"$ctx\".")
+            } else if (hasCtx) {
+                append(" Use this context: \"$ctx\".")
+            } else if (hasImage) {
+                append(" An attached screenshot provides visual context — use it to inform your response.")
+            }
+            append(" Input: \"$text\"")
         }
     }
 
@@ -428,7 +506,7 @@ $text
         }
         if (text.startsWith("```")) {
             text = text.replace(Regex("^```[a-zA-Z]*\\s*"), "")
-            text = text.replace(Regex("```$"), "")
+            text = text.replace(Regex("```\\s*$"), "")
         }
         return text.trim()
     }
@@ -437,17 +515,40 @@ $text
     // Local/Online generation (online runs on IO)
     // ------------------------------------------------------------
 
-    private suspend fun generateAccordingToMode(prompt: String, jsonMode: Boolean = false): String {
+    private suspend fun generateAccordingToMode(prompt: String, jsonMode: Boolean = false, imagePath: String? = null): String {
         return when (getApiMode()) {
-            "online" -> generateOnline(prompt, jsonMode)
-            "best" -> tryOnlineThenLocal(prompt, jsonMode)
-            else -> generateLocal(prompt)
+            "online" -> generateOnline(prompt, jsonMode, imagePath)
+            "best" -> tryOnlineThenLocal(prompt, jsonMode, imagePath)
+            else -> generateLocalWithImage(prompt, imagePath)
         }
     }
 
     private fun generateLocal(prompt: String): String {
         val engine = ensureLlmReady() ?: throw IllegalStateException("LLM not ready")
         ensurePromptFits(engine, prompt)
+        return engine.generate(prompt)
+    }
+
+    private fun generateLocalWithImage(prompt: String, imagePath: String?): String {
+        val engine = ensureLlmReady() ?: throw IllegalStateException("LLM not ready")
+        ensurePromptFits(engine, prompt)
+        Log.d("LocalScribe", "[Service] imagePath=$imagePath supportsVision=${engine.supportsVision}")
+        if (imagePath != null && engine.supportsVision) {
+            // Downscale to cap vision-token count (LiteRT-LM patch limits) and reduce latency.
+            val bitmap = try { ImageUtils.decodeDownscaled(imagePath, 1024) } catch (_: Exception) { null }
+            if (bitmap != null) {
+                try {
+                    Log.d("LocalScribe", "[Service] Sending image (${bitmap.width}x${bitmap.height}) to LLM")
+                    return engine.generate(prompt, listOf(bitmap))
+                } catch (e: Exception) {
+                    Log.w("LocalScribe", "Multimodal local generation failed, falling back to text-only: ${e.message}")
+                } finally {
+                    bitmap.recycle()
+                }
+            } else {
+                Log.w("LocalScribe", "[Service] decodeDownscaled returned null for $imagePath")
+            }
+        }
         return engine.generate(prompt)
     }
 
@@ -461,32 +562,44 @@ $text
         )
     }
 
-    private suspend fun tryOnlineThenLocal(prompt: String, jsonMode: Boolean = false): String {
+    private suspend fun tryOnlineThenLocal(prompt: String, jsonMode: Boolean = false, imagePath: String? = null): String {
         val key = getApiKey()
         val model = getApiModel()
         if (key.isNotBlank() && isInternetAvailable()) {
             try {
-                return callGemini(prompt, key, model, jsonMode)
+                return callGemini(prompt, key, model, jsonMode, imagePath)
             } catch (e: QuotaExhaustedException) {
                 throw e // don't fall back — surface quota error to user
-            } catch (_: Exception) {
-                // fall back to local
+            } catch (e: Exception) {
+                Log.w("LocalScribe", "[best] Gemini failed, falling back to local: ${e.message}")
             }
         }
-        return generateLocal(prompt)
+        return generateLocalWithImage(prompt, imagePath)
     }
 
-    private suspend fun generateOnline(prompt: String, jsonMode: Boolean = false): String {
+    private suspend fun generateOnline(prompt: String, jsonMode: Boolean = false, imagePath: String? = null): String {
         val key = getApiKey()
         val model = getApiModel()
         if (key.isBlank()) throw IllegalStateException("No API key set \u2014 add one in AI Settings")
         if (!isInternetAvailable()) throw IllegalStateException("No internet connection")
-        return callGemini(prompt, key, model, jsonMode)
+        return callGemini(prompt, key, model, jsonMode, imagePath)
     }
 
-    private suspend fun callGemini(prompt: String, apiKey: String, model: String, jsonMode: Boolean = false): String =
+    private suspend fun callGemini(
+        prompt: String,
+        apiKey: String,
+        model: String,
+        jsonMode: Boolean = false,
+        imagePath: String? = null,
+    ): String =
         withContext(Dispatchers.IO) {
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            // Auto-promote text-only Gemma models when an image is attached
+            val effectiveModel = if (imagePath != null && model in NON_VISION_GEMINI_MODELS) {
+                Log.i("LocalScribe", "Auto-promoting $model → gemini-2.5-flash for multimodal call")
+                "gemini-2.5-flash"
+            } else model
+
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$effectiveModel:generateContent")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
@@ -494,16 +607,33 @@ $text
                 setRequestProperty("X-Goog-Api-Key", apiKey)
             }
 
+            val partsArray = org.json.JSONArray().apply {
+                // Gemini recommends image BEFORE text for best grounding.
+                if (imagePath != null) {
+                    try {
+                        val imageBytes = File(imagePath).readBytes()
+                        val b64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+                        put(org.json.JSONObject().apply {
+                            put("inlineData", org.json.JSONObject().apply {
+                                put("mimeType", "image/png")
+                                put("data", b64)
+                            })
+                        })
+                    } catch (e: Exception) {
+                        Log.w("LocalScribe", "Could not attach image to Gemini request: ${e.message}")
+                    }
+                }
+                put(org.json.JSONObject().put("text", prompt))
+            }
+
             val body = org.json.JSONObject().apply {
                 put("contents", org.json.JSONArray().apply {
                     put(org.json.JSONObject().apply {
                         put("role", "user")
-                        put("parts", org.json.JSONArray().apply {
-                            put(org.json.JSONObject().put("text", prompt))
-                        })
+                        put("parts", partsArray)
                     })
                 })
-                if (jsonMode && model.startsWith("gemini")) {
+                if (jsonMode && effectiveModel.startsWith("gemini")) {
                     put("generationConfig", org.json.JSONObject().put("responseMimeType", "application/json"))
                 }
             }
@@ -540,6 +670,7 @@ $text
     // LLM init (model-path validation + reuse)
     // ------------------------------------------------------------
 
+    @Synchronized
     private fun ensureLlmReady(): LocalLlm? {
         val modelPath = getSavedModelPath()
 
@@ -554,7 +685,8 @@ $text
 
         return try {
             llm?.close()
-            llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens())
+            val visionSupport = getModelVisionSupport(modelPath)
+            llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens(), visionSupport)
             currentModelPath = modelPath
             llm
         } catch (e: Exception) {
@@ -563,6 +695,22 @@ $text
             currentModelPath = null
             null
         }
+    }
+
+    /** Returns whether the user has indicated their model supports vision/image input. */
+    private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
+    }
+
+    /**
+     * Returns true if the "Attach Screenshot" button should be enabled.
+     * Requires API 30+. In local-only mode, also requires the loaded model to support vision.
+     */
+    private fun isAttachVisionEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
     }
 
     // ------------------------------------------------------------
@@ -610,8 +758,9 @@ $text
         val keywords = getAllKeywords()
         if (keywords.isEmpty()) return null
         val pattern = keywords.joinToString("|") { Regex.escape(it) }
-        // Use colon-delimited arg (?rewrite:formal) so text after the command is preserved
-        val re = Regex("""(?i)\?($pattern)(?::(\w+))?\b""")
+        // Use colon-delimited arg (?rewrite:super-formal) so text after the command is preserved.
+        // Argument charset allows hyphens so multi-word tags like `super-formal` parse intact.
+        val re = Regex("""(?i)\?($pattern)(?::([\w-]+))?\b""")
 
         val matches = re.findAll(full).toList()
         if (matches.isEmpty()) return null
@@ -630,8 +779,8 @@ $text
         val keywords = getAllKeywords()
         if (keywords.isEmpty()) return full
         val pattern = keywords.joinToString("|") { Regex.escape(it) }
-        // Match colon-delimited arg only (?rewrite:formal), not space-separated
-        val re = Regex("""(?i)\?($pattern)(?::\w+)?\b""")
+        // Match colon-delimited arg only (?rewrite:super-formal), not space-separated
+        val re = Regex("""(?i)\?($pattern)(?::[\w-]+)?\b""")
 
         val matches = re.findAll(full).toList()
         if (matches.isEmpty()) return full
@@ -706,6 +855,11 @@ $text
         overlayContextCancel = view.findViewById(R.id.btnContextCancel)
         overlayContextOk = view.findViewById(R.id.btnContextOk)
 
+        overlayBtnAttachScreenshot = view.findViewById(R.id.btnAttachScreenshot)
+        overlayAttachedThumbWrap = view.findViewById(R.id.attachedThumbWrap)
+        overlayAttachedThumb = view.findViewById(R.id.attachedThumb)
+        overlayBtnDetachScreenshot = view.findViewById(R.id.btnDetachScreenshot)
+
         overlayCancelButton?.setOnClickListener { onCancel() }
 
         // Apply dark mode theming if enabled
@@ -729,11 +883,18 @@ $text
         )
         params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
 
+        overlayLayoutParams = params
         wm.addView(view, params)
         overlayView = view
     }
 
     private fun hideOverlay() {
+        // Cancel any in-flight crop operation first
+        captureJob?.cancel()
+        captureJob = null
+        pendingCropDeferred?.takeIf { !it.isCompleted }?.complete(null)
+        pendingCropDeferred = null
+
         // prevent deferred hangs
         previewDeferred?.takeIf { !it.isCompleted }?.complete(false)
         previewDeferred = null
@@ -744,6 +905,7 @@ $text
             try { wm.removeView(it) } catch (_: Exception) {}
         }
         overlayView = null
+        overlayLayoutParams = null
         overlayLoadingCard = null
         overlayProgress = null
         overlayCancelButton = null
@@ -761,6 +923,12 @@ $text
         overlayContextInput = null
         overlayContextCancel = null
         overlayContextOk = null
+
+        overlayBtnAttachScreenshot = null
+        overlayAttachedThumbWrap = null
+        overlayAttachedThumb = null
+        overlayBtnDetachScreenshot = null
+        attachedScreenshotPath = null
     }
 
     private fun showLoadingUi() {
@@ -791,6 +959,11 @@ $text
 
     private fun showContextUi(onCancel: () -> Unit, onOk: () -> Unit) {
         overlayContextInput?.setText("")
+        // Reset attachment state for this fresh dialog session
+        attachedScreenshotPath = null
+        overlayAttachedThumbWrap?.visibility = View.GONE
+        overlayBtnAttachScreenshot?.visibility = View.VISIBLE
+
         overlayContextBox?.visibility = View.VISIBLE
         overlayLoadingCard?.visibility = View.GONE
         overlayPreviewBox?.visibility = View.GONE
@@ -814,6 +987,130 @@ $text
             hideKeyboard()
             onOk()
         }
+
+        // ---- Attach Screenshot button ----
+        val attachBtn = overlayBtnAttachScreenshot
+        if (attachBtn != null) {
+            val visionEnabled = isAttachVisionEnabled()
+            attachBtn.isEnabled = visionEnabled
+            attachBtn.alpha = if (visionEnabled) 1.0f else 0.35f
+            attachBtn.setOnClickListener {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    Toast.makeText(this, "Screenshot capture requires Android 11+", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                captureJob?.cancel()
+                captureJob = scope.launch { captureAndCrop() }
+            }
+        }
+
+        overlayBtnDetachScreenshot?.setOnClickListener {
+            attachedScreenshotPath = null
+            overlayAttachedThumbWrap?.visibility = View.GONE
+            overlayBtnAttachScreenshot?.visibility = View.VISIBLE
+        }
+    }
+
+    /**
+     * Temporarily removes the overlay from WindowManager (so it doesn't appear in the
+     * screenshot), captures the screen, opens [CropActivity] for the user to select a region,
+     * then re-adds the overlay and shows a thumbnail of the cropped image.
+     */
+    private suspend fun captureAndCrop() {
+        val viewRef = overlayView ?: return
+        val params = overlayLayoutParams ?: return
+
+        // 1. Detach overlay so it's not visible in the screenshot
+        withContext(Dispatchers.Main) {
+            try { wm.removeView(viewRef) } catch (_: Exception) {}
+            overlayView = null
+        }
+        // Small delay — give the compositor one vsync to redraw without our overlay
+        delay(200)
+
+        // 2. Capture the screen
+        val bitmap = try {
+            ScreenshotCaptureHelper.captureViaA11y(this@TypiLikeAccessibilityService)
+        } catch (e: ScreenshotUnsupportedException) {
+            withContext(Dispatchers.Main) {
+                reAttachOverlay(viewRef, params)
+                Toast.makeText(this@TypiLikeAccessibilityService, e.message, Toast.LENGTH_LONG).show()
+            }
+            return
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                reAttachOverlay(viewRef, params)
+                Toast.makeText(this@TypiLikeAccessibilityService, "Screenshot failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        // 3. Write full screenshot to temp file (background)
+        val screenshotFile = withContext(Dispatchers.IO) {
+            try {
+                val dir = File(cacheDir, "ls_screenshots").apply { mkdirs() }
+                val f = File(dir, "ss_${System.currentTimeMillis()}.png")
+                FileOutputStream(f).use { fos -> bitmap.compress(Bitmap.CompressFormat.PNG, 90, fos) }
+                bitmap.recycle()
+                f
+            } catch (e: Exception) {
+                bitmap.recycle()
+                null
+            }
+        }
+
+        if (screenshotFile == null) {
+            withContext(Dispatchers.Main) {
+                reAttachOverlay(viewRef, params)
+                Toast.makeText(this@TypiLikeAccessibilityService, "Failed to save screenshot", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        // 4. Prepare a deferred to receive the crop result, then launch CropActivity
+        val deferred = CompletableDeferred<String?>()
+        pendingCropDeferred = deferred
+
+        withContext(Dispatchers.Main) {
+            val intent = Intent(this@TypiLikeAccessibilityService, CropActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(CropActivity.EXTRA_SCREENSHOT_PATH, screenshotFile.absolutePath)
+            }
+            startActivity(intent)
+        }
+
+        // 5. Wait for crop result (max 2 minutes; user may take time to crop)
+        val cropPath = try {
+            withTimeoutOrNull(120_000L) { deferred.await() }
+        } finally {
+            if (!deferred.isCompleted) deferred.complete(null)
+            if (pendingCropDeferred === deferred) pendingCropDeferred = null
+        }
+
+        // Clean up the full screenshot temp file
+        withContext(Dispatchers.IO) { screenshotFile.delete() }
+
+        // 6. Re-attach the overlay and update the thumbnail
+        withContext(Dispatchers.Main) {
+            reAttachOverlay(viewRef, params)
+            if (cropPath != null) {
+                attachedScreenshotPath = cropPath
+                val thumb = BitmapFactory.decodeFile(cropPath)
+                if (thumb != null) {
+                    val scaledThumb = Bitmap.createScaledBitmap(thumb, 112, 112, true)
+                    overlayAttachedThumb?.setImageBitmap(scaledThumb)
+                    overlayAttachedThumbWrap?.visibility = View.VISIBLE
+                    overlayBtnAttachScreenshot?.visibility = View.GONE
+                    if (thumb !== scaledThumb) thumb.recycle()
+                }
+            }
+        }
+    }
+
+    private fun reAttachOverlay(view: View, params: WindowManager.LayoutParams) {
+        try { wm.addView(view, params) } catch (_: Exception) {}
+        overlayView = view
+        overlayLayoutParams = params
     }
 
     private fun hideKeyboard() {
@@ -863,7 +1160,7 @@ $text
         return r
     }
 
-    private data class ContextDecision(val include: Boolean, val text: String)
+    private data class ContextDecision(val include: Boolean, val text: String, val imagePath: String? = null)
 
     private suspend fun awaitContextInput(genId: Int): ContextDecision {
         val decision = CompletableDeferred<ContextDecision>()
@@ -879,12 +1176,12 @@ $text
                 onCancel = {
                     if (decision.isCompleted) return@showContextUi
                     val text = overlayContextInput?.text?.toString().orEmpty()
-                    decision.complete(ContextDecision(false, text))
+                    decision.complete(ContextDecision(false, text, imagePath = null))
                 },
                 onOk = {
                     if (decision.isCompleted) return@showContextUi
                     val text = overlayContextInput?.text?.toString().orEmpty()
-                    decision.complete(ContextDecision(true, text))
+                    decision.complete(ContextDecision(true, text, imagePath = attachedScreenshotPath))
                 }
             )
         }

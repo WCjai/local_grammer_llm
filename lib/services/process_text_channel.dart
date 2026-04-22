@@ -22,13 +22,25 @@ class ProcessTextChannelService {
     required String command,
     String? arg,
     String? context,
+    String? imagePath,
   }) async {
     return _channel.invokeMethod<String>('generate', {
       'text': text,
       'command': command,
       if (arg != null) 'arg': arg,
       if (context != null && context.isNotEmpty) 'context': context,
+      if (imagePath != null) 'imagePath': imagePath,
     });
+  }
+
+  Future<bool> getModelSupportsVision() async {
+    return await _channel.invokeMethod<bool>('getModelSupportsVision') ?? false;
+  }
+
+  /// Triggers AccessibilityService screenshot capture + CropActivity.
+  /// Returns the crop file path, or null if cancelled / unavailable.
+  Future<String?> captureScreenshot() async {
+    return _channel.invokeMethod<String?>('captureScreenshot');
   }
 
   void finishWithResult(String text) {

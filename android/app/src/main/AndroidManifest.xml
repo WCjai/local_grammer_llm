@@ -7,6 +7,9 @@
         android:icon="@mipmap/ic_launcher">
         <uses-native-library android:name="libvndksupport.so" android:required="false"/>
         <uses-native-library android:name="libOpenCL.so" android:required="false"/>
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -60,6 +63,12 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/typi_like_accessibility_config" />
         </service>
+
+        <activity
+            android:name=".CropActivity"
+            android:exported="false"
+            android:theme="@style/ProcessTextTheme"
+            android:excludeFromRecents="true" />
 
     </application>
     <!-- Required to query activities that can process text, see:

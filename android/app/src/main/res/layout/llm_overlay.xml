@@ -278,6 +278,58 @@
                     android:padding="0dp" />
             </ScrollView>
 
+            <!-- Attach screenshot row (shown above action buttons) -->
+            <LinearLayout
+                android:id="@+id/attachScreenshotRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="24dp"
+                android:paddingEnd="24dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="4dp">
+
+                <ImageButton
+                    android:id="@+id/btnAttachScreenshot"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:src="@drawable/ic_image_add"
+                    android:background="@drawable/ghost_rect"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:tint="#6C3FC5"
+                    android:contentDescription="Attach screenshot" />
+
+                <!-- Thumbnail shown after a screenshot is attached -->
+                <FrameLayout
+                    android:id="@+id/attachedThumbWrap"
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    android:layout_marginStart="12dp"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/attachedThumb"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:scaleType="centerCrop"
+                        android:contentDescription="Attached screenshot thumbnail" />
+
+                    <ImageButton
+                        android:id="@+id/btnDetachScreenshot"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="top|end"
+                        android:src="@drawable/ic_close_small"
+                        android:background="@android:color/transparent"
+                        android:tint="#FFFFFF"
+                        android:contentDescription="Remove screenshot" />
+
+                </FrameLayout>
+
+            </LinearLayout>
+
             <View
                 android:id="@+id/contextDivider2"
                 android:layout_width="match_parent"

@@ -1,10 +1,15 @@
 package dev.jai.localscribe
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.os.Bundle
+import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.android.FlutterActivityLaunchConfigs.BackgroundMode
 import io.flutter.embedding.engine.FlutterEngine
@@ -14,7 +19,9 @@ import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -39,11 +46,16 @@ class ProcessTextActivity : FlutterActivity() {
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
     private val DEFAULT_MAX_TOKENS = 512
     private val DEFAULT_OUTPUT_TOKENS = 128
+    private val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
+    private val NON_VISION_GEMINI_MODELS = setOf("gemma-3n-e2b-it", "gemma-3n-e4b-it")
+    private val CROP_SCREENSHOT_REQUEST = 7021
 
     private var llm: LocalLlm? = null
     private var currentModelPath: String? = null
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var methodChannel: MethodChannel? = null
+    /** Holds the pending MethodChannel.Result for an in-progress captureScreenshot call. */
+    private var pendingCaptureResult: MethodChannel.Result? = null
 
     private var inputText: String = ""
     private var isReadOnly: Boolean = true
@@ -98,25 +110,80 @@ class ProcessTextActivity : FlutterActivity() {
                         result.success(getShowContext())
                     }
 
+                    "getModelSupportsVision" -> {
+                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        result.success(prefs.getBoolean(KEY_MODEL_SUPPORTS_VISION, false))
+                    }
+
+                    "captureScreenshot" -> {
+                        val svc = TypiLikeAccessibilityService.instance
+                        if (svc == null) {
+                            result.error("NO_SERVICE", "Accessibility service not running — enable it in Settings to use screenshot capture", null)
+                            return@setMethodCallHandler
+                        }
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                            result.error("API_TOO_LOW", "Screenshot capture requires Android 11+", null)
+                            return@setMethodCallHandler
+                        }
+                        if (pendingCaptureResult != null) {
+                            result.error("BUSY", "Already capturing a screenshot", null)
+                            return@setMethodCallHandler
+                        }
+                        pendingCaptureResult = result
+                        ioScope.launch {
+                            val bitmap = try {
+                                ScreenshotCaptureHelper.captureViaA11y(svc)
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    pendingCaptureResult?.error("CAPTURE_FAIL", e.message, null)
+                                    pendingCaptureResult = null
+                                }
+                                return@launch
+                            }
+                            val screenshotFile = try {
+                                val dir = File(cacheDir, "ls_screenshots").apply { mkdirs() }
+                                val f = File(dir, "ss_${System.currentTimeMillis()}.png")
+                                FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.PNG, 90, it) }
+                                bitmap.recycle()
+                                f
+                            } catch (e: Exception) {
+                                bitmap.recycle()
+                                withContext(Dispatchers.Main) {
+                                    pendingCaptureResult?.error("SAVE_FAIL", e.message, null)
+                                    pendingCaptureResult = null
+                                }
+                                return@launch
+                            }
+                            withContext(Dispatchers.Main) {
+                                val intent = Intent(this@ProcessTextActivity, CropActivity::class.java).apply {
+                                    putExtra(CropActivity.EXTRA_SCREENSHOT_PATH, screenshotFile.absolutePath)
+                                }
+                                @Suppress("DEPRECATION")
+                                startActivityForResult(intent, CROP_SCREENSHOT_REQUEST)
+                            }
+                        }
+                    }
+
                     "generate" -> {
                         val text = call.argument<String>("text") ?: ""
                         val command = call.argument<String>("command") ?: ""
                         val arg = call.argument<String>("arg")
                         val context = call.argument<String>("context") ?: ""
+                        val imagePath = call.argument<String>("imagePath")
 
                         val isScribe = command == "scribe"
                         ioScope.launch {
                             try {
                                 val prompt = if (isScribe) {
-                                    buildScribePrompt(text, context)
+                                    buildScribePrompt(text, context, imagePath != null)
                                 } else {
                                     val customTask = getCustomTaskIfAny(command)
                                     val task = customTask ?: mapCommandToTask(command, arg)
-                                    buildTaggedPrompt(task, text, context)
+                                    buildTaggedPrompt(task, text, context, imagePath != null)
                                 }
 
-                                val raw = withTimeout(20_000) {
-                                    generateAccordingToMode(prompt, jsonMode = !isScribe)
+                                val raw = withTimeout(if (imagePath != null) 120_000L else 20_000L) {
+                                    generateAccordingToMode(prompt, jsonMode = !isScribe, imagePath = imagePath)
                                 }
 
                                 val processed = if (isScribe) {
@@ -163,6 +230,21 @@ class ProcessTextActivity : FlutterActivity() {
         ))
     }
 
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == CROP_SCREENSHOT_REQUEST) {
+            val pending = pendingCaptureResult
+            pendingCaptureResult = null
+            if (resultCode == Activity.RESULT_OK) {
+                val cropPath = data?.getStringExtra(CropActivity.EXTRA_CROP_PATH)
+                pending?.success(cropPath)
+            } else {
+                pending?.success(null)
+            }
+        }
+    }
+
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         methodChannel?.setMethodCallHandler(null)
         methodChannel = null
@@ -178,17 +260,37 @@ class ProcessTextActivity : FlutterActivity() {
 
     // ---- Prompt building ----
 
-    private fun buildTaggedPrompt(task: String, text: String, context: String?): String {
+    private fun buildTaggedPrompt(task: String, text: String, context: String?, hasImage: Boolean = false): String {
         val ctx = context?.trim().orEmpty()
-        val rules = """
-Keep the same language as the input unless the task says otherwise.
-Keep the SAME point of view and pronouns (do NOT change I/you/She/He/they).
-Preserve the original meaning and intent exactly.
-Do not add new facts or remove unique details.
-keep names, numbers,dates and places unchanged.
-Do not mention the task, rules, or context in the output.
-Output only the final answer (no explanations, no quotes, no formatting).
-""".trimIndent()
+
+        val contextSection = when {
+            ctx.isNotBlank() -> """
+[CONTEXT]
+$ctx
+[/CONTEXT]"""
+            else -> ""
+        }
+
+        val imageSection = if (hasImage) """
+[IMAGE_CONTEXT]
+A screenshot is attached. Use it as visual reference to understand the subject matter, identify key details, and improve the quality of the output. The image and the text below refer to the same topic.
+[/IMAGE_CONTEXT]""" else ""
+
+        val rules = buildString {
+            appendLine("Keep the same language as the input unless the task says otherwise.")
+            appendLine("Keep the SAME point of view and pronouns (do NOT change I/you/She/He/they).")
+            appendLine("Preserve the original meaning and intent exactly.")
+            appendLine("Do not add new facts or remove unique details.")
+            appendLine("Keep names, numbers, dates and places unchanged.")
+            appendLine("Do not mention the task, rules, or context in the output.")
+            if (hasImage && ctx.isNotBlank())
+                appendLine("The screenshot and the context text together form the background — use both to inform the task.")
+            else if (hasImage)
+                appendLine("Use insights from the attached screenshot to inform the task.")
+            else if (ctx.isNotBlank())
+                appendLine("Use the provided context to inform the task.")
+            append("Output only the final answer (no explanations, no quotes, no formatting).")
+        }.trimEnd()
 
         return """
 You are a writing engine.
@@ -202,11 +304,8 @@ If you cannot comply, return: {"output":""}
 [TASK]
 $task
 [/TASK]
-
-[CONTEXT]
-${if (ctx.isBlank()) "(none)" else ctx}
-[/CONTEXT]
-
+$contextSection
+$imageSection
 [RULES]
 $rules
 [/RULES]
@@ -217,12 +316,20 @@ $text
 """.trimIndent()
     }
 
-    private fun buildScribePrompt(text: String, context: String?): String {
+    private fun buildScribePrompt(text: String, context: String?, hasImage: Boolean = false): String {
         val ctx = context?.trim().orEmpty()
-        return if (ctx.isBlank()) {
-            "Respond in the same language as the input. Provide only the final answer. No explanations. Input: \"$text\""
-        } else {
-            "Respond in the same language as the input. Use this context: \"$ctx\". Provide only the final answer. No explanations. Input: \"$text\""
+        val hasCtx = ctx.isNotBlank()
+
+        return buildString {
+            append("Respond in the same language as the input. Provide only the final answer. No explanations.")
+            if (hasCtx && hasImage) {
+                append(" The following context and the attached screenshot both provide background — use them together: \"$ctx\".")
+            } else if (hasCtx) {
+                append(" Use this context: \"$ctx\".")
+            } else if (hasImage) {
+                append(" An attached screenshot provides visual context — use it to inform your response.")
+            }
+            append(" Input: \"$text\"")
         }
     }
 
@@ -306,18 +413,42 @@ $text
             text = text.substring(3, text.length - 3).trim()
         if (text.startsWith("```")) {
             text = text.replace(Regex("^```[a-zA-Z]*\\s*"), "")
-            text = text.replace(Regex("```$"), "")
+            text = text.replace(Regex("```\\s*$"), "")
         }
         return text.trim()
     }
 
     // ---- LLM generation ----
 
-    private suspend fun generateAccordingToMode(prompt: String, jsonMode: Boolean = false): String {
+    private suspend fun generateAccordingToMode(prompt: String, jsonMode: Boolean = false, imagePath: String? = null): String {
         return when (getApiMode()) {
-            "online" -> generateOnline(prompt, jsonMode)
-            "best" -> tryOnlineThenLocal(prompt, jsonMode)
-            else -> generateLocal(prompt)
+            "online" -> generateOnline(prompt, jsonMode, imagePath)
+            "best" -> tryOnlineThenLocal(prompt, jsonMode, imagePath)
+            else -> if (imagePath != null) generateLocalWithImage(prompt, imagePath) else generateLocal(prompt)
+        }
+    }
+
+    private fun generateLocalWithImage(prompt: String, imagePath: String): String {
+        val engine = ensureLlmReady() ?: throw IllegalStateException("LLM not ready. Pick a model first.")
+        Log.d("LocalScribe", "[ProcessText] imagePath=$imagePath supportsVision=${engine.supportsVision}")
+        if (!engine.supportsVision) {
+            Log.w("LocalScribe", "[ProcessText] Model does not support vision, ignoring image")
+            return engine.generate(prompt)
+        }
+        // Downscale to keep vision-token count under model patch limits.
+        val bmp = try { ImageUtils.decodeDownscaled(imagePath, 1024) } catch (_: Exception) { null }
+        if (bmp == null) {
+            Log.w("LocalScribe", "[ProcessText] decodeDownscaled returned null for $imagePath, falling back to text-only")
+            return engine.generate(prompt)
+        }
+        return try {
+            Log.d("LocalScribe", "[ProcessText] Sending image (${bmp.width}x${bmp.height}) to LLM")
+            engine.generate(prompt, listOf(bmp))
+        } catch (e: Exception) {
+            Log.w("LocalScribe", "Multimodal generation failed, retrying text-only: ${e.message}")
+            engine.generate(prompt)
+        } finally {
+            bmp.recycle()
         }
     }
 
@@ -334,83 +465,137 @@ $text
         return engine.generate(prompt)
     }
 
-    private suspend fun tryOnlineThenLocal(prompt: String, jsonMode: Boolean = false): String {
+    private suspend fun tryOnlineThenLocal(prompt: String, jsonMode: Boolean = false, imagePath: String? = null): String {
         val key = getApiKey()
         val model = getApiModel()
         if (key.isNotBlank() && isInternetAvailable()) {
-            try { return callGemini(prompt, key, model, jsonMode) } catch (_: Exception) {}
+            try { return callGemini(prompt, key, model, jsonMode, imagePath) } catch (e: Exception) {
+                Log.w("LocalScribe", "[best] Gemini failed, falling back to local: ${e.message}")
+            }
         }
-        return generateLocal(prompt)
+        return if (imagePath != null) generateLocalWithImage(prompt, imagePath) else generateLocal(prompt)
     }
 
-    private suspend fun generateOnline(prompt: String, jsonMode: Boolean = false): String {
+    private suspend fun generateOnline(prompt: String, jsonMode: Boolean = false, imagePath: String? = null): String {
         val key = getApiKey()
         val model = getApiModel()
         if (key.isBlank()) throw IllegalStateException("No API key set \u2014 add one in AI Settings")
         if (!isInternetAvailable()) throw IllegalStateException("No internet connection")
-        return callGemini(prompt, key, model, jsonMode)
+        return callGemini(prompt, key, model, jsonMode, imagePath)
     }
 
-    private suspend fun callGemini(prompt: String, apiKey: String, model: String, jsonMode: Boolean = false): String =
-        withContext(Dispatchers.IO) {
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+    private suspend fun callGemini(
+        prompt: String,
+        apiKey: String,
+        model: String,
+        jsonMode: Boolean = false,
+        imagePath: String? = null
+    ): String = withContext(Dispatchers.IO) {
+        val effectiveModel = if (imagePath != null && model in NON_VISION_GEMINI_MODELS) "gemini-2.5-flash" else model
+        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$effectiveModel:generateContent")
+
+        // Downscale + JPEG-encode the image once to keep payload size reasonable.
+        val imgBytes: ByteArray? = if (imagePath != null) {
+            try {
+                val bmp = ImageUtils.decodeDownscaled(imagePath, 1024)
+                if (bmp != null) {
+                    val out = ByteArrayOutputStream()
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                    bmp.recycle()
+                    out.toByteArray()
+                } else null
+            } catch (_: Exception) { null }
+        } else null
+
+        val partsArray = JSONArray()
+        if (imgBytes != null) {
+            partsArray.put(JSONObject().apply {
+                put("inlineData", JSONObject().apply {
+                    put("mimeType", "image/jpeg")
+                    put("data", Base64.encodeToString(imgBytes, Base64.NO_WRAP))
+                })
+            })
+        }
+        partsArray.put(JSONObject().put("text", prompt))
+        val body = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", partsArray)
+                })
+            })
+            if (jsonMode && effectiveModel.startsWith("gemini")) {
+                put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+            }
+        }
+        val bodyBytes = body.toString().toByteArray(Charsets.UTF_8)
+
+        var lastError: String? = null
+        for (attempt in 0..1) {
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("X-Goog-Api-Key", apiKey)
             }
-            val body = JSONObject().apply {
-                put("contents", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().put("text", prompt))
-                        })
-                    })
-                })
-                if (jsonMode && model.startsWith("gemini")) {
-                    put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+            try {
+                conn.outputStream.use { it.write(bodyBytes) }
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = BufferedReader(InputStreamReader(stream)).use { it.readText() }
+                if (code in 200..299) {
+                    val json = JSONObject(text)
+                    val candidates = json.optJSONArray("candidates") ?: return@withContext ""
+                    if (candidates.length() == 0) return@withContext ""
+                    val first = candidates.getJSONObject(0)
+                    val contentObj = first.optJSONObject("content") ?: return@withContext ""
+                    val partsArr = contentObj.optJSONArray("parts") ?: return@withContext ""
+                    if (partsArr.length() == 0) return@withContext ""
+                    return@withContext buildString {
+                        for (i in 0 until partsArr.length()) {
+                            val part = partsArr.getJSONObject(i)
+                            if (!part.optBoolean("thought", false)) {
+                                append(part.optString("text", ""))
+                            }
+                        }
+                    }.trim()
                 }
+                lastError = text
+                if (attempt == 0 && (code == 500 || code == 503)) {
+                    Log.w("LocalScribe", "Gemini HTTP $code (transient), retrying once")
+                    delay(500)
+                    continue
+                }
+                throw IOException("Gemini API error: $text")
+            } finally {
+                try { conn.disconnect() } catch (_: Exception) {}
             }
-            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = BufferedReader(InputStreamReader(stream)).use { it.readText() }
-            if (code !in 200..299) throw IOException("Gemini API error: $text")
-            val json = JSONObject(text)
-            val candidates = json.optJSONArray("candidates") ?: return@withContext ""
-            if (candidates.length() == 0) return@withContext ""
-            val first = candidates.getJSONObject(0)
-            val contentObj = first.optJSONObject("content") ?: return@withContext ""
-            val partsArr = contentObj.optJSONArray("parts") ?: return@withContext ""
-            if (partsArr.length() == 0) return@withContext ""
-            // Skip parts with "thought":true (Gemma 4 / thinking models emit reasoning chunks)
-            buildString {
-                for (i in 0 until partsArr.length()) {
-                    val part = partsArr.getJSONObject(i)
-                    if (!part.optBoolean("thought", false)) {
-                        append(part.optString("text", ""))
-                    }
-                }
-            }.trim()
         }
+        throw IOException("Gemini API error: ${lastError ?: "unknown"}")
+    }
 
     // ---- LLM init ----
 
+    @Synchronized
     private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
         if (!File(path).exists()) { llm = null; currentModelPath = null; return null }
         if (llm != null && currentModelPath == path) return llm
         return try {
             llm?.close()
-            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens())
+            val visionSupport = getModelVisionSupport(path)
+            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport)
             currentModelPath = path
             llm
         } catch (e: Exception) {
             Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
             llm = null; currentModelPath = null; null
         }
+    }
+
+    private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
     }
 
     // ---- SharedPreferences helpers ----

@@ -27,6 +27,7 @@ class SettingsProvider extends ChangeNotifier {
 
   bool _showPreview = false;
   bool _showContext = false;
+  bool _modelSupportsVision = false;
 
   int _maxTokens = 512;
   int _outputTokens = 128;
@@ -39,6 +40,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get apiKeyVisible => _apiKeyVisible;
   bool get showPreview => _showPreview;
   bool get showContext => _showContext;
+  bool get modelSupportsVision => _modelSupportsVision;
   int get maxTokens => _maxTokens;
   int get outputTokens => _outputTokens;
 
@@ -48,6 +50,7 @@ class SettingsProvider extends ChangeNotifier {
       _refreshPreview(),
       _refreshContext(),
       _refreshTokens(),
+      _refreshVision(),
     ]);
   }
 
@@ -183,6 +186,21 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> setOutputTokens(int value) async {
     await _channel.setOutputTokens(value);
     _outputTokens = value;
+    notifyListeners();
+  }
+
+  Future<void> _refreshVision() async {
+    try {
+      _modelSupportsVision = await _channel.getModelSupportsVision();
+    } catch (_) {
+      _modelSupportsVision = false;
+    }
+    notifyListeners();
+  }
+
+  Future<void> setModelSupportsVision(bool value) async {
+    await _channel.setModelSupportsVision(value);
+    _modelSupportsVision = value;
     notifyListeners();
   }
 

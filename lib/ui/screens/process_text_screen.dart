@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -105,6 +106,10 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
   String? _error;
   String? _activeCommand;
   final _contextCtrl = TextEditingController();
+  final _inputScrollCtrl = ScrollController();
+  String? _attachedImagePath;
+  bool _modelSupportsVision = false;
+  bool _capturingScreenshot = false;
 
   @override
   void initState() {
@@ -125,6 +130,7 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
   @override
   void dispose() {
     _anim.dispose();
+    _inputScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -132,11 +138,14 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
     try {
       final data = await _channel.getProcessTextData();
       final prompts = await _channel.getPrompts();
+      bool supportsVision = false;
+      try { supportsVision = await _channel.getModelSupportsVision(); } catch (_) {}
       if (!mounted) return;
       setState(() {
         _inputText = data?['text']?.toString() ?? '';
         _isReadOnly = data?['readOnly'] == true;
         _prompts = prompts;
+        _modelSupportsVision = supportsVision;
         _dataLoaded = true;
       });
     } catch (e) {
@@ -162,6 +171,7 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
         command: keyword,
         arg: arg,
         context: ctx.isNotEmpty ? ctx : null,
+        imagePath: _attachedImagePath,
       );
       if (!mounted) return;
       setState(() {
@@ -174,6 +184,37 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
         _loading = false;
         _error = '$e';
       });
+    }
+  }
+
+  Future<void> _captureScreenshot() async {
+    setState(() => _capturingScreenshot = true);
+    // Slide the sheet off-screen so it is not captured in the screenshot.
+    await _anim.reverse();
+    await Future.delayed(const Duration(milliseconds: 120));
+
+    String? path;
+    Object? captureError;
+    try {
+      path = await _channel.captureScreenshot();
+    } catch (e) {
+      captureError = e;
+    }
+
+    if (!mounted) return;
+    // Restore the sheet before updating state.
+    await _anim.forward();
+    if (!mounted) return;
+
+    setState(() {
+      _capturingScreenshot = false;
+      if (path != null) _attachedImagePath = path;
+    });
+
+    if (captureError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Screenshot unavailable: $captureError')),
+      );
     }
   }
 
@@ -287,13 +328,22 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
                     color: cs.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Text(
-                    _inputText,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: cs.onSurface.withValues(alpha: 0.8),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 88),
+                    child: Scrollbar(
+                      controller: _inputScrollCtrl,
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: _inputScrollCtrl,
+                        primary: false,
+                        child: Text(
+                          _inputText,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: cs.onSurface.withValues(alpha: 0.8),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -352,33 +402,45 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        TextField(
-          controller: _contextCtrl,
-          maxLines: 2,
-          minLines: 1,
-          style: TextStyle(fontSize: 14, color: cs.onSurface),
-          decoration: InputDecoration(
-            hintText: 'Add context (optional)',
-            hintStyle: TextStyle(color: cs.onSurface.withValues(alpha: 0.4)),
-            prefixIcon: Icon(Icons.notes, color: cs.primary, size: 20),
-            filled: true,
-            fillColor: cs.surfaceContainerHighest,
-            isDense: true,
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: cs.outlineVariant),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _contextCtrl,
+                maxLines: 2,
+                minLines: 1,
+                style: TextStyle(fontSize: 14, color: cs.onSurface),
+                decoration: InputDecoration(
+                  hintText: 'Add context (optional)',
+                  hintStyle:
+                      TextStyle(color: cs.onSurface.withValues(alpha: 0.4)),
+                  prefixIcon: Icon(Icons.notes, color: cs.primary, size: 20),
+                  filled: true,
+                  fillColor: cs.surfaceContainerHighest,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: cs.outlineVariant),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: cs.outlineVariant),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: cs.primary, width: 1.4),
+                  ),
+                ),
+              ),
             ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: cs.outlineVariant),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: cs.primary, width: 1.4),
-            ),
-          ),
+            if (_modelSupportsVision) ...[
+              const SizedBox(width: 8),
+              _buildScreenshotButton(cs),
+            ],
+          ],
         ),
         const SizedBox(height: 14),
         Text(
@@ -414,6 +476,67 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
           }).toList(),
         ),
       ],
+    );
+  }
+
+  /// A compact square button that shows the camera icon or a thumbnail
+  /// (with a remove badge) when a screenshot is already attached.
+  Widget _buildScreenshotButton(ColorScheme cs) {
+    if (_attachedImagePath != null) {
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.file(
+              File(_attachedImagePath!),
+              width: 44,
+              height: 44,
+              fit: BoxFit.cover,
+            ),
+          ),
+          Positioned(
+            top: -5,
+            right: -5,
+            child: GestureDetector(
+              onTap: () => setState(() => _attachedImagePath = null),
+              child: Container(
+                width: 18,
+                height: 18,
+                decoration: BoxDecoration(
+                  color: cs.error,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: cs.surface, width: 1.5),
+                ),
+                child: Icon(Icons.close, size: 11, color: cs.onError),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return Tooltip(
+      message: 'Attach screenshot',
+      child: Material(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: _capturingScreenshot ? null : _captureScreenshot,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: _capturingScreenshot
+                ? Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: cs.primary),
+                  )
+                : Icon(Icons.add_photo_alternate_outlined,
+                    size: 22, color: cs.primary),
+          ),
+        ),
+      ),
     );
   }
 

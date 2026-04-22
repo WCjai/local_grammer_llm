@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:local_grammer_llm/models/chat_message.dart';
 import 'package:local_grammer_llm/services/platform_channel_service.dart';
 import 'package:local_grammer_llm/ui/widgets/suggestions_list.dart';
@@ -16,20 +17,18 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _channel = LlmChannelService();
 
-  static final List<ChatMessage> _cachedMessages = [];
-  static String _cachedDraft = "";
-
   final _promptCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
 
   bool _busy = false;
+  bool _historyLoaded = false;
   int _generationId = 0;
 
   final List<ChatMessage> _messages = [];
 
-  void _showNotice(String message) {
-    showAppSnackBar(context, message);
-  }
+  static const _historyKey = 'prompt_gen_history';
+
+  void _showNotice(String message) => showAppSnackBar(context, message);
 
   static const Set<String> _reservedKeywords = {
     "fix", "rewrite", "scribe", "summ", "polite", "casual",
@@ -275,27 +274,85 @@ Output JSON only, format:
       if (!mounted || myGenId != _generationId) return;
       setState(() => _busy = false);
       _scrollToBottom();
+      _saveHistory().ignore();
     }
+  }
+
+  // ── Persistence ────────────────────────────────────────────────────────────
+
+  Map<String, dynamic> _msgToJson(ChatMessage msg) => {
+        'role': msg.role == ChatRole.user ? 'user' : 'assistant',
+        'text': msg.text,
+        'suggestions': msg.suggestions
+            ?.map((s) => {
+                  'keyword': s.keyword,
+                  'label': s.label,
+                  'prompt': s.prompt,
+                })
+            .toList(),
+      };
+
+  ChatMessage _msgFromJson(Map<String, dynamic> j) {
+    final role = j['role'] == 'user' ? ChatRole.user : ChatRole.assistant;
+    final text = (j['text'] ?? '') as String;
+    final rawS = j['suggestions'];
+    List<PromptSuggestion>? suggestions;
+    if (rawS is List) {
+      final list = rawS
+          .whereType<Map>()
+          .map((s) => PromptSuggestion(
+                keyword: s['keyword'] as String? ?? '',
+                prompt: s['prompt'] as String? ?? '',
+                label: s['label'] as String?,
+              ))
+          .where((s) => s.keyword.isNotEmpty && s.prompt.isNotEmpty)
+          .toList();
+      if (list.isNotEmpty) suggestions = list;
+    }
+    return ChatMessage(role: role, text: text, suggestions: suggestions);
+  }
+
+  Future<void> _loadHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_historyKey);
+    if (!mounted) return;
+    setState(() {
+      _historyLoaded = true;
+      if (raw == null) return;
+      try {
+        final list = jsonDecode(raw) as List;
+        _messages.addAll(
+          list.whereType<Map<String, dynamic>>().map(_msgFromJson),
+        );
+      } catch (_) {}
+    });
+    if (_messages.isNotEmpty) _scrollToBottom();
+  }
+
+  Future<void> _saveHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _historyKey,
+      jsonEncode(_messages.map(_msgToJson).toList()),
+    );
+  }
+
+  Future<void> _clearHistory() async {
+    setState(() => _messages.clear());
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_historyKey);
+    _showNotice('History cleared');
   }
 
   @override
   void initState() {
     super.initState();
-    if (_cachedMessages.isNotEmpty) {
-      _messages.addAll(_cachedMessages);
-    }
-    if (_cachedDraft.isNotEmpty) {
-      _promptCtrl.text = _cachedDraft;
-    }
+    _loadHistory();
   }
 
   @override
   void dispose() {
     _generationId++;
-    _cachedMessages
-      ..clear()
-      ..addAll(_messages);
-    _cachedDraft = _promptCtrl.text;
     _promptCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -303,100 +360,199 @@ Output JSON only, format:
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final hasMessages = _messages.isNotEmpty;
     return Scaffold(
-      appBar: AppBar(title: const Text("Prompt Generator")),
+      appBar: AppBar(
+        title: const Text('Prompt Generator'),
+        actions: [
+          if (hasMessages && !_busy)
+            IconButton(
+              icon: const Icon(Icons.delete_sweep_outlined),
+              tooltip: 'Clear history',
+              onPressed: _clearHistory,
+            ),
+        ],
+      ),
       body: SafeArea(
         child: Column(
           children: [
             Expanded(
-              child: ListView.builder(
-                controller: _scrollCtrl,
-                padding: const EdgeInsets.all(12),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final msg = _messages[index];
-                  final isUser = msg.role == ChatRole.user;
-
-                  final bubbleColor = isUser
-                      ? Theme.of(context).colorScheme.primary
-                      : Theme.of(context).colorScheme.surfaceContainerHighest;
-                  final textColor = isUser
-                      ? Theme.of(context).colorScheme.onPrimary
-                      : Theme.of(context).colorScheme.onSurface;
-
-                  return Align(
-                    alignment:
-                        isUser ? Alignment.centerRight : Alignment.centerLeft,
-                    child: GestureDetector(
-                      onLongPress: msg.text.isEmpty
-                          ? null
-                          : () async {
-                              await Clipboard.setData(
-                                  ClipboardData(text: msg.text));
-                            },
-                      child: Container(
-                        constraints: const BoxConstraints(maxWidth: 340),
-                        margin: const EdgeInsets.symmetric(vertical: 6),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: bubbleColor,
-                          borderRadius: BorderRadius.circular(14),
-                          border: isUser
-                              ? null
-                              : Border.all(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .outlineVariant),
+              child: !_historyLoaded
+                  ? const Center(child: CircularProgressIndicator())
+                  : !hasMessages
+                      ? _buildEmptyState(theme)
+                      : ListView.builder(
+                          controller: _scrollCtrl,
+                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                          itemCount: _messages.length,
+                          itemBuilder: _buildMessageItem,
                         ),
-                        child: msg.suggestions != null
-                            ? SuggestionsList(
-                                suggestions: msg.suggestions!,
-                                onAdd: _addSuggestion,
-                              )
-                            : Text(
-                                msg.text,
-                                style: TextStyle(color: textColor),
-                              ),
-                      ),
-                    ),
-                  );
-                },
-              ),
             ),
-            const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _promptCtrl,
-                      minLines: 1,
-                      maxLines: 4,
-                      decoration: const InputDecoration(
-                        hintText: "Describe the kind of prompts you want",
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    onPressed: _busy ? null : _generate,
-                    child: _busy
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text("Generate"),
-                  ),
-                ],
-              ),
-            ),
+            _buildInputBar(theme),
           ],
         ),
       ),
     );
   }
+
+  Widget _buildEmptyState(ThemeData theme) => Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.auto_awesome_outlined,
+                size: 52,
+                color: theme.colorScheme.outlineVariant,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Describe the kind of prompts you need',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "I'll suggest keywords and prompts you can add to the app.",
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.outline,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Widget _buildMessageItem(BuildContext context, int index) {
+    final msg = _messages[index];
+    final isUser = msg.role == ChatRole.user;
+    final theme = Theme.of(context);
+    final isGenerating =
+        !isUser && msg.text == 'Generating...' && msg.suggestions == null;
+
+    final bubbleColor = isUser
+        ? theme.colorScheme.primary
+        : theme.colorScheme.surfaceContainerHighest;
+    final textColor =
+        isUser ? theme.colorScheme.onPrimary : theme.colorScheme.onSurface;
+
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: GestureDetector(
+        onLongPress: msg.text.isEmpty || isGenerating
+            ? null
+            : () async {
+                await Clipboard.setData(ClipboardData(text: msg.text));
+                if (mounted) _showNotice('Copied to clipboard');
+              },
+        child: Container(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.sizeOf(context).width * 0.85,
+          ),
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: bubbleColor,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(18),
+              topRight: const Radius.circular(18),
+              bottomLeft: Radius.circular(isUser ? 18 : 4),
+              bottomRight: Radius.circular(isUser ? 4 : 18),
+            ),
+            border: isUser
+                ? null
+                : Border.all(color: theme.colorScheme.outlineVariant),
+          ),
+          child: isGenerating
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: textColor,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text('Generating\u2026', style: TextStyle(color: textColor)),
+                  ],
+                )
+              : msg.suggestions != null
+                  ? SuggestionsList(
+                      suggestions: msg.suggestions!,
+                      onAdd: _addSuggestion,
+                    )
+                  : Text(
+                      msg.text,
+                      style: TextStyle(color: textColor),
+                    ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputBar(ThemeData theme) => Container(
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surface,
+          border: Border(
+            top: BorderSide(color: theme.colorScheme.outlineVariant),
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _promptCtrl,
+                minLines: 1,
+                maxLines: 4,
+                textCapitalization: TextCapitalization.sentences,
+                onSubmitted: (_) {
+                  if (!_busy) _generate();
+                },
+                decoration: InputDecoration(
+                  hintText: 'Describe what you want to generate\u2026',
+                  filled: true,
+                  fillColor: theme.colorScheme.surfaceContainerHighest,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: _busy ? null : _generate,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                padding: EdgeInsets.zero,
+                shape: const CircleBorder(),
+              ),
+              child: _busy
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.arrow_upward_rounded),
+            ),
+          ],
+        ),
+      );
 }
