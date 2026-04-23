@@ -2,13 +2,17 @@ package dev.jai.localscribe
 
 import android.content.Context
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Log
 import android.view.accessibility.AccessibilityManager
 import androidx.annotation.NonNull
 import io.flutter.embedding.android.FlutterActivity
@@ -17,6 +21,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -25,7 +30,10 @@ import java.net.URL
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -53,9 +61,14 @@ class MainActivity : FlutterActivity() {
     private val DEFAULT_OUTPUT_TOKENS = 128
     private var pendingPickResult: MethodChannel.Result? = null
     private val PICK_MODEL_REQUEST = 7010
+    private val NOTIFICATION_PERMISSION_REQUEST = 7011
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var progressSink: EventChannel.EventSink? = null
     private var currentModelPath: String? = null
+    // Download state delegated to ModelDownloadService
+    private var pendingDownloadResult: MethodChannel.Result? = null
+    private var downloadReceiver: BroadcastReceiver? = null
+    private var pendingPermissionResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -70,6 +83,53 @@ class MainActivity : FlutterActivity() {
                     progressSink = null
                 }
             })
+
+        // Register broadcast receiver for ModelDownloadService updates
+        val filter = IntentFilter().apply {
+            addAction(ModelDownloadService.BROADCAST_PROGRESS)
+            addAction(ModelDownloadService.BROADCAST_DONE)
+            addAction(ModelDownloadService.BROADCAST_ERROR)
+            addAction(ModelDownloadService.BROADCAST_CANCELLED)
+        }
+        downloadReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    ModelDownloadService.BROADCAST_PROGRESS -> {
+                        val prog = intent.getDoubleExtra(ModelDownloadService.EXTRA_PROGRESS, -1.0)
+                        runOnUiThread { emitProgress(prog, false) }
+                    }
+                    ModelDownloadService.BROADCAST_DONE -> {
+                        val path = intent.getStringExtra(ModelDownloadService.EXTRA_PATH) ?: ""
+                        llm?.close(); llm = null
+                        emitProgress(1.0, true)
+                        runOnUiThread {
+                            pendingDownloadResult?.success(path)
+                            pendingDownloadResult = null
+                        }
+                    }
+                    ModelDownloadService.BROADCAST_ERROR -> {
+                        val msg = intent.getStringExtra(ModelDownloadService.EXTRA_MESSAGE)
+                        emitProgress(1.0, true)
+                        runOnUiThread {
+                            pendingDownloadResult?.error("DOWNLOAD_FAIL", msg, null)
+                            pendingDownloadResult = null
+                        }
+                    }
+                    ModelDownloadService.BROADCAST_CANCELLED -> {
+                        emitProgress(1.0, true)
+                        runOnUiThread {
+                            pendingDownloadResult?.error("CANCELLED", "Download cancelled by user", null)
+                            pendingDownloadResult = null
+                        }
+                    }
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(downloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(downloadReceiver, filter)
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -114,7 +174,10 @@ class MainActivity : FlutterActivity() {
                     "getModelName" -> {
                         val path = getSavedModelPath()
                         val name = try {
-                            File(path).name
+                            val f = File(path)
+                            // Don't surface the placeholder "model.task" basename
+                            // from DEFAULT_MODEL_PATH when no real model exists.
+                            if (f.exists()) f.name else ""
                         } catch (_: Exception) {
                             ""
                         }
@@ -299,6 +362,35 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "cancelDownload" -> {
+                        val cancelIntent = Intent(this, ModelDownloadService::class.java).apply {
+                            action = ModelDownloadService.ACTION_CANCEL
+                        }
+                        startService(cancelIntent)
+                        result.success(true)
+                    }
+
+                    "isDownloadActive" -> {
+                        // A pendingDownloadResult is held while the foreground
+                        // service is running. Used by widgets that mount
+                        // mid-download to restore their UI.
+                        result.success(pendingDownloadResult != null)
+                    }
+
+                    "downloadModel" -> {
+                        val url = call.argument<String>("url")
+                        if (url.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "url is required", null)
+                            return@setMethodCallHandler
+                        }
+                        pendingDownloadResult = result
+                        val svcIntent = Intent(this, ModelDownloadService::class.java).apply {
+                            action = ModelDownloadService.ACTION_START
+                            putExtra(ModelDownloadService.EXTRA_URL, url)
+                        }
+                        startForegroundService(svcIntent)
+                    }
+
                     "pickModel" -> {
                         if (pendingPickResult != null) {
                             result.error("BUSY", "Another pickModel request is in progress", null)
@@ -388,10 +480,101 @@ class MainActivity : FlutterActivity() {
                         val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
                         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .edit().putBoolean(KEY_MODEL_SUPPORTS_VISION, enabled).apply()
-                        // Reset the cached LLM so next inference picks up the new flag
+                        // Tear down so ensureLlmReady() rebuilds with the new vision flag.
                         llm?.close()
                         llm = null
-                        result.success(true)
+                        currentModelPath = null
+
+                        // Eagerly rebuild so the change takes effect immediately instead
+                        // of waiting until the next inference call. This also surfaces any
+                        // init failure (e.g. vision backend not supported by the model file)
+                        // at toggle time rather than mid-inference.
+                        ioScope.launch {
+                            try {
+                                ensureLlmReady()
+                                Log.i("LocalScribe", "Vision toggle applied: supportsVision=$enabled, engine rebuilt")
+                            } catch (e: Exception) {
+                                Log.e("LocalScribe", "setModelSupportsVision init failed: ${e.message}", e)
+                            }
+                            withContext(Dispatchers.Main) { result.success(true) }
+                        }
+                    }
+
+                    "deleteModel" -> {
+                        ioScope.launch {
+                            try {
+                                llm?.close()
+                                llm = null
+                                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                val path = prefs.getString(KEY_MODEL_PATH, null)
+                                if (!path.isNullOrBlank()) {
+                                    File(path).delete()
+                                    File("${path}.part").delete()
+                                    // Also delete any raw-name part files in filesDir
+                                    filesDir.listFiles()?.filter {
+                                        it.name.endsWith(".part")
+                                    }?.forEach { it.delete() }
+                                }
+                                prefs.edit().remove(KEY_MODEL_PATH).apply()
+                                withContext(Dispatchers.Main) { result.success(true) }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    result.error("DELETE_FAIL", e.message, null)
+                                }
+                            }
+                        }
+                    }
+
+                    "getProcessingMode" -> {
+                        result.success(getProcessingMode())
+                    }
+
+                    "setProcessingMode" -> {
+                        val requested = call.argument<String>("mode") ?: "cpu"
+                        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit().putString("processing_mode", requested).apply()
+                        // Tear down so the next ensureLlmReady() rebuilds with the new backend.
+                        llm?.close()
+                        llm = null
+                        currentModelPath = null
+
+                        // Eagerly try to rebuild — this surfaces GPU init failures here
+                        // (where we can fall back to CPU and tell the UI) instead of
+                        // crashing later mid-inference.
+                        ioScope.launch {
+                            val actual = try {
+                                val engine = ensureLlmReady()
+                                engine?.activeBackend ?: requested
+                            } catch (e: Exception) {
+                                Log.e("LocalScribe", "setProcessingMode init failed: ${e.message}", e)
+                                "cpu"
+                            }
+                            // Persist the actually-used backend so the toggle reflects reality.
+                            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                .edit().putString("processing_mode", actual).apply()
+                            withContext(Dispatchers.Main) {
+                                result.success(actual)
+                            }
+                        }
+                    }
+
+                    "requestNotificationPermission" -> {
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                            // Android < 13 — runtime permission not needed
+                            result.success(true)
+                            return@setMethodCallHandler
+                        }
+                        val granted = checkSelfPermission("android.permission.POST_NOTIFICATIONS") ==
+                                android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (granted) {
+                            result.success(true)
+                            return@setMethodCallHandler
+                        }
+                        pendingPermissionResult = result
+                        requestPermissions(
+                            arrayOf("android.permission.POST_NOTIFICATIONS"),
+                            NOTIFICATION_PERMISSION_REQUEST
+                        )
                     }
 
                     else -> result.notImplemented()
@@ -410,6 +593,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        try { unregisterReceiver(downloadReceiver) } catch (_: Exception) {}
+        downloadReceiver = null
         try {
             llm?.close()
             llm = null
@@ -684,14 +869,29 @@ class MainActivity : FlutterActivity() {
     }
 
     @Synchronized
+    private fun getProcessingMode(): String {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("processing_mode", "cpu") ?: "cpu"
+    }
+
     private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
         if (llm != null && currentModelPath == path) return llm
         return try {
             if (!File(path).exists()) return null
             llm?.close()
-            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens())
+            val visionSupport = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean("model_supports_vision", false)
+            val engine = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport, getProcessingMode())
+            llm = engine
             currentModelPath = path
+            // If GPU was requested but the factory fell back to CPU, persist the
+            // actually-used backend so the settings UI reflects reality on next read.
+            val savedMode = getProcessingMode()
+            if (savedMode != engine.activeBackend) {
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit().putString("processing_mode", engine.activeBackend).apply()
+            }
             llm
         } catch (e: Exception) {
             android.util.Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
@@ -803,6 +1003,13 @@ class MainActivity : FlutterActivity() {
         }
         ioScope.launch {
             try {
+                // Delete the previously stored model before accepting the new one
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val oldPath = prefs.getString(KEY_MODEL_PATH, null)
+                if (!oldPath.isNullOrBlank()) {
+                    File(oldPath).delete()
+                    File("${oldPath}.part").delete()
+                }
                 val copied = copyModelToInternal(uri, displayName) { progress ->
                     emitProgress(progress, false)
                 }
@@ -921,6 +1128,20 @@ class MainActivity : FlutterActivity() {
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
         return enabled.split(':').any { it.equals(target, ignoreCase = true) }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            val granted = grantResults.isNotEmpty() &&
+                    grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+            pendingPermissionResult?.success(granted)
+            pendingPermissionResult = null
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

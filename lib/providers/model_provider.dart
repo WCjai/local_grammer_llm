@@ -88,6 +88,9 @@ class ModelProvider extends ChangeNotifier {
     _busy = true;
     _copying = true;
     _copyProgress = null;
+    // Clear any stale name (e.g. "model.task" placeholder) up front so the
+    // UI doesn't briefly show the wrong filename while the new file copies.
+    _modelName = "";
     notifyListeners();
 
     String? message;
@@ -96,6 +99,9 @@ class ModelProvider extends ChangeNotifier {
       final hasPath = path != null && path.trim().isNotEmpty;
       _ready = false;
       _hasModel = hasPath;
+      if (hasPath) {
+        _modelName = path.split(RegExp(r'[/\\]')).last;
+      }
       message = hasPath ? "Model copied. Initializing..." : "No model selected.";
       notifyListeners();
 
@@ -108,6 +114,25 @@ class ModelProvider extends ChangeNotifier {
       _busy = false;
       notifyListeners();
       await refreshModelStatus();
+    }
+    return message;
+  }
+
+  Future<String?> deleteModel() async {
+    _busy = true;
+    notifyListeners();
+    String? message;
+    try {
+      await _channel.deleteModel();
+      _ready = false;
+      _hasModel = false;
+      _modelName = "";
+      message = "Model deleted.";
+    } catch (e) {
+      message = "Delete error: $e";
+    } finally {
+      _busy = false;
+      notifyListeners();
     }
     return message;
   }

@@ -28,6 +28,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _showPreview = false;
   bool _showContext = false;
   bool _modelSupportsVision = false;
+  String _processingMode = "cpu";
 
   int _maxTokens = 512;
   int _outputTokens = 128;
@@ -41,6 +42,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get showPreview => _showPreview;
   bool get showContext => _showContext;
   bool get modelSupportsVision => _modelSupportsVision;
+  String get processingMode => _processingMode;
   int get maxTokens => _maxTokens;
   int get outputTokens => _outputTokens;
 
@@ -51,6 +53,7 @@ class SettingsProvider extends ChangeNotifier {
       _refreshContext(),
       _refreshTokens(),
       _refreshVision(),
+      _refreshProcessingMode(),
     ]);
   }
 
@@ -202,6 +205,26 @@ class SettingsProvider extends ChangeNotifier {
     await _channel.setModelSupportsVision(value);
     _modelSupportsVision = value;
     notifyListeners();
+  }
+
+  Future<void> _refreshProcessingMode() async {
+    try {
+      _processingMode = await _channel.getProcessingMode();
+    } catch (_) {
+      _processingMode = "cpu";
+    }
+    notifyListeners();
+  }
+
+  Future<void> setProcessingMode(String mode) async {
+    final actual = await _channel.setProcessingMode(mode);
+    _processingMode = actual;
+    notifyListeners();
+    if (actual != mode) {
+      // GPU was requested but the device fell back to CPU.
+      throw Exception(
+          "${mode.toUpperCase()} backend isn't available on this device — using CPU instead.");
+    }
   }
 
   @override

@@ -686,7 +686,9 @@ $text
         return try {
             llm?.close()
             val visionSupport = getModelVisionSupport(modelPath)
-            llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens(), visionSupport)
+            val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString("processing_mode", "cpu") ?: "cpu"
+            llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens(), visionSupport, processingMode)
             currentModelPath = modelPath
             llm
         } catch (e: Exception) {
@@ -890,6 +892,9 @@ $text
 
     private fun hideOverlay() {
         // Cancel any in-flight crop operation first
+        if (captureJob != null || pendingCropDeferred != null) {
+            Log.d("LocalScribe", "[Service] hideOverlay: cancelling captureJob/crop deferred (attachedScreenshotPath=$attachedScreenshotPath)")
+        }
         captureJob?.cancel()
         captureJob = null
         pendingCropDeferred?.takeIf { !it.isCompleted }?.complete(null)
@@ -960,6 +965,7 @@ $text
     private fun showContextUi(onCancel: () -> Unit, onOk: () -> Unit) {
         overlayContextInput?.setText("")
         // Reset attachment state for this fresh dialog session
+        Log.d("LocalScribe", "[Service] showContextUi: clearing attachedScreenshotPath (was=$attachedScreenshotPath)")
         attachedScreenshotPath = null
         overlayAttachedThumbWrap?.visibility = View.GONE
         overlayBtnAttachScreenshot?.visibility = View.VISIBLE
@@ -995,6 +1001,7 @@ $text
             attachBtn.isEnabled = visionEnabled
             attachBtn.alpha = if (visionEnabled) 1.0f else 0.35f
             attachBtn.setOnClickListener {
+                Log.d("LocalScribe", "[Service] attach tapped (visionEnabled=$visionEnabled, current attachedScreenshotPath=$attachedScreenshotPath)")
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                     Toast.makeText(this, "Screenshot capture requires Android 11+", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
@@ -1005,6 +1012,7 @@ $text
         }
 
         overlayBtnDetachScreenshot?.setOnClickListener {
+            Log.d("LocalScribe", "[Service] detach tapped: clearing attachedScreenshotPath (was=$attachedScreenshotPath)")
             attachedScreenshotPath = null
             overlayAttachedThumbWrap?.visibility = View.GONE
             overlayBtnAttachScreenshot?.visibility = View.VISIBLE
@@ -1091,10 +1099,12 @@ $text
         withContext(Dispatchers.IO) { screenshotFile.delete() }
 
         // 6. Re-attach the overlay and update the thumbnail
+        Log.d("LocalScribe", "[Service] captureAndCrop: cropPath=$cropPath (null means cancel/timeout)")
         withContext(Dispatchers.Main) {
             reAttachOverlay(viewRef, params)
             if (cropPath != null) {
                 attachedScreenshotPath = cropPath
+                Log.d("LocalScribe", "[Service] captureAndCrop: attachedScreenshotPath set to $cropPath")
                 val thumb = BitmapFactory.decodeFile(cropPath)
                 if (thumb != null) {
                     val scaledThumb = Bitmap.createScaledBitmap(thumb, 112, 112, true)
@@ -1176,11 +1186,13 @@ $text
                 onCancel = {
                     if (decision.isCompleted) return@showContextUi
                     val text = overlayContextInput?.text?.toString().orEmpty()
+                    Log.d("LocalScribe", "[Service] context onCancel")
                     decision.complete(ContextDecision(false, text, imagePath = null))
                 },
                 onOk = {
                     if (decision.isCompleted) return@showContextUi
                     val text = overlayContextInput?.text?.toString().orEmpty()
+                    Log.d("LocalScribe", "[Service] context onOk: attachedScreenshotPath=$attachedScreenshotPath")
                     decision.complete(ContextDecision(true, text, imagePath = attachedScreenshotPath))
                 }
             )

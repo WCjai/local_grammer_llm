@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:local_grammer_llm/services/platform_channel_service.dart';
 import 'package:local_grammer_llm/services/preferences_service.dart';
 import 'package:local_grammer_llm/providers/settings_provider.dart';
-import 'package:local_grammer_llm/ui/widgets/engine_card.dart';
+import 'package:local_grammer_llm/ui/widgets/model_download_card.dart';
 import 'package:local_grammer_llm/app.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -21,12 +23,13 @@ class _OnboardingScreenState extends State<OnboardingScreen>
   final _pageCtrl = PageController();
   int _currentPage = 0;
 
-  // Page 1 – Engine
-  String _engineMode = "local"; // "local" | "cloud"
-  bool _engineReady = false;
+  // Page 1 – AI Provider choice
+  String _provider = "gemini"; // "gemini" | "local"
   bool _pickingModel = false;
+  bool _downloadingModel = false;
   bool _copying = false;
   double? _copyProgress;
+  bool _localModelReady = false;
   final _onboardApiKeyCtrl = TextEditingController();
   String _onboardApiModel = "gemini-2.5-flash";
   bool _onboardApiValidating = false;
@@ -44,15 +47,17 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     WidgetsBinding.instance.addObserver(this);
     _checkAccessibility();
     _progressSub = _channel.progressStream.listen((event) {
-      if (event is Map) {
-        final progress = event["progress"];
-        final done = event["done"] == true;
-        setState(() {
-          _copying = !done;
-          _copyProgress = (progress is num) ? progress.toDouble() : null;
-        });
-      }
+      if (event is! Map) return;
+      final progress = event["progress"];
+      final done = event["done"] == true;
+      final newProgress = (progress is num) ? progress.toDouble() : null;
+      if (!mounted) return;
+      setState(() {
+        _copying = !done;
+        _copyProgress = newProgress;
+      });
     }, onError: (_) {
+      if (!mounted) return;
       setState(() {
         _copying = false;
         _copyProgress = null;
@@ -73,7 +78,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
       if (!mounted) return;
       final wasGranted = _accessibilityGranted;
       setState(() => _accessibilityGranted = granted);
-      if (!wasGranted && _accessibilityGranted && _currentPage == 2) {
+      if (!wasGranted && _accessibilityGranted && _currentPage == _accessibilityPageIndex) {
         try {
           await _channel.setServiceEnabled(true);
         } catch (_) {}
@@ -82,11 +87,22 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     } catch (_) {}
   }
 
+  int get _totalPages => _provider == "both" ? 6 : 5;
+  int get _accessibilityPageIndex => 1;
+
   void _goNext() {
-    if (_currentPage < 3) {
+    if (_currentPage < _totalPages - 1) {
       _pageCtrl.nextPage(
           duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
       setState(() => _currentPage++);
+    }
+  }
+
+  void _goPrev() {
+    if (_currentPage > 0) {
+      _pageCtrl.previousPage(
+          duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
+      setState(() => _currentPage--);
     }
   }
 
@@ -113,7 +129,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
       final ok = path != null && path.trim().isNotEmpty;
       if (!mounted) return;
       setState(() {
-        _engineReady = ok;
+        _localModelReady = ok;
         _pickingModel = false;
       });
       if (ok) {
@@ -123,7 +139,6 @@ class _OnboardingScreenState extends State<OnboardingScreen>
       if (!mounted) return;
       setState(() {
         _pickingModel = false;
-        _engineReady = false;
       });
     } finally {
       if (mounted) setState(() => _copying = false);
@@ -150,7 +165,6 @@ class _OnboardingScreenState extends State<OnboardingScreen>
       setState(() {
         _onboardApiValid = ok;
         _onboardApiValidating = false;
-        _engineReady = ok;
       });
     } catch (e) {
       if (!mounted) return;
@@ -158,8 +172,39 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         _onboardApiValid = false;
         _onboardApiError = "$e";
         _onboardApiValidating = false;
-        _engineReady = false;
       });
+    }
+  }
+
+  Future<void> _localSetupAdvance() async {
+    if (_provider == "both") {
+      try { await _channel.setApiMode("best"); } catch (_) {}
+    }
+    if (mounted) _goNext();
+  }
+
+  Future<void> _onboardSaveAndAdvance() async {
+    if (_provider == "both") {
+      // Gemini slide for "both" — validate key then advance to local slide
+      final key = _onboardApiKeyCtrl.text.trim();
+      if (key.isNotEmpty) {
+        await _onboardValidateCloud();
+        // Always advance even if validation fails — local model is the fallback
+      }
+      if (mounted) _goNext();
+      return;
+    }
+    final key = _onboardApiKeyCtrl.text.trim();
+    if (key.isEmpty) {
+      try {
+        await _channel.setApiMode("online");
+      } catch (_) {}
+      if (mounted) _goNext();
+      return;
+    }
+    await _onboardValidateCloud();
+    if (mounted && _onboardApiValid == true) {
+      _goNext();
     }
   }
 
@@ -184,7 +229,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 children: [
-                  ...List.generate(4, (i) {
+                  ...List.generate(_totalPages, (i) {
                     return Container(
                       width: i == _currentPage ? 24 : 8,
                       height: 8,
@@ -209,8 +254,9 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                 onPageChanged: (i) => setState(() => _currentPage = i),
                 children: [
                   _buildWelcome(cs),
-                  _buildEngine(cs),
                   _buildAccessibility(cs),
+                  _buildProviderChoice(cs),
+                  if (_provider == "both") ...[_buildGeminiSetup(cs), _buildLocalSetup(cs)] else _buildProviderSetup(cs),
                   _buildProcessText(cs),
                 ],
               ),
@@ -243,7 +289,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             "Your private, on-device AI writing assistant.\nFix grammar, rewrite text, and more — right from any app.",
             textAlign: TextAlign.center,
             style: TextStyle(
-                fontSize: 16, color: cs.onSurface.withOpacity(0.7)),
+                fontSize: 16, color: cs.onSurface.withValues(alpha: 0.7)),
           ),
           const SizedBox(height: 40),
           SizedBox(
@@ -263,162 +309,646 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     );
   }
 
-  Widget _buildEngine(ColorScheme cs) {
+  // ── Provider Choice (page 1) ──────────────────────────────────────────────
+
+  Widget _buildProviderChoice(ColorScheme cs) {
+    Widget providerRow({
+      required bool selected,
+      required IconData icon,
+      required String title,
+      required VoidCallback onTap,
+    }) {
+      return InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: selected
+                ? cs.primary.withValues(alpha: 0.08)
+                : cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: selected ? cs.primary : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(icon,
+                  color: selected ? cs.primary : cs.onSurface.withValues(alpha: 0.7)),
+              const SizedBox(width: 14),
+              Text(title,
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                      color: cs.onSurface)),
+              const Spacer(),
+              Icon(
+                selected
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
+                color: selected ? cs.primary : cs.outline,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final pros = _provider == "gemini"
+        ? [
+            "Best performance and accuracy",
+            "Fast processing",
+            "Free tier available for most users",
+            "Always up-to-date with latest improvements",
+          ]
+        : _provider == "local"
+        ? [
+            "Completely private — nothing leaves your device",
+            "Works fully offline",
+            "No API key required",
+          ]
+        : [
+            "Best of both — cloud speed with offline fallback",
+            "Automatic failover to on-device when offline",
+            "Can switch modes anytime in settings",
+          ];
+
+    final cons = _provider == "gemini"
+        ? [
+            "Requires internet connection",
+            "API key needed (free to obtain)",
+            "Text sent to Google servers for processing",
+          ]
+        : _provider == "local"
+        ? [
+            "Requires a .task or .litertlm model file (~1–4 GB)",
+            "Slower on older devices compared to cloud",
+          ]
+        : [
+            "Requires both an API key and a model file",
+            "Higher initial setup effort",
+          ];
+
     return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            "Choose Your Engine",
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          Text("Choose Your AI Provider",
+              style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: cs.onSurface)),
+          const SizedBox(height: 8),
+          Text(
+            "Select how you want Local Scribe to process your text.",
+            style: TextStyle(color: cs.onSurface.withValues(alpha: 0.7)),
+          ),
+          const SizedBox(height: 20),
+          providerRow(
+            selected: _provider == "gemini",
+            icon: Icons.cloud_outlined,
+            title: "Gemini (Cloud AI)",
+            onTap: () => setState(() => _provider = "gemini"),
+          ),
+          const SizedBox(height: 12),
+          providerRow(
+            selected: _provider == "local",
+            icon: Icons.phone_android,
+            title: "On-Device AI (Gemma)",
+            onTap: () => setState(() => _provider = "local"),
+          ),
+          const SizedBox(height: 12),
+          providerRow(
+            selected: _provider == "both",
+            icon: Icons.auto_awesome_outlined,
+            title: "Both (Cloud + On-Device)",
+            onTap: () => setState(() => _provider = "both"),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ...pros.map((s) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text("• ",
+                              style:
+                                  TextStyle(color: cs.onSurface)),
+                          Expanded(
+                              child: Text(s,
+                                  style: TextStyle(
+                                      color: cs.onSurface))),
+                        ],
+                      ),
+                    )),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 16, color: Colors.orange.shade700),
+                    const SizedBox(width: 6),
+                    Text("Considerations",
+                        style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: Colors.orange.shade700)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                ...cons.map((s) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text("• ",
+                              style:
+                                  TextStyle(color: cs.onSurface)),
+                          Expanded(
+                              child: Text(s,
+                                  style: TextStyle(
+                                      color: cs.onSurface))),
+                        ],
+                      ),
+                    )),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Icon(Icons.settings_outlined,
+                  size: 14,
+                  color: cs.onSurface.withValues(alpha: 0.45)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  "You can change this anytime in Settings → AI Settings",
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                      color: cs.onSurface.withValues(alpha: 0.45)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          _buildNavRow(cs,
+              onBack: _goPrev,
+              onNext: _goNext,
+              nextLabel: "Continue"),
+        ],
+      ),
+    );
+  }
+
+  // ── Provider Setup dispatcher (page 2) ─────────────────────────────────────
+
+  Widget _buildProviderSetup(ColorScheme cs) {
+    if (_provider == "gemini") return _buildGeminiSetup(cs);
+    return _buildLocalSetup(cs);
+  }
+
+  // ── Gemini Setup ───────────────────────────────────────────────────────────
+
+  Widget _buildGeminiSetup(ColorScheme cs) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.cloud_outlined, size: 36, color: cs.primary),
+              const SizedBox(width: 12),
+              Text("Set Up Gemini",
+                  style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: cs.onSurface)),
+            ],
           ),
           const SizedBox(height: 8),
           Text(
-            "Local runs entirely on-device (private). Cloud uses the Gemini API (faster, needs internet).",
-            style: TextStyle(color: cs.onSurface.withOpacity(0.7)),
+            "Enter your Google Gemini API key to enable cloud AI features.",
+            style: TextStyle(color: cs.onSurface.withValues(alpha: 0.7)),
           ),
           const SizedBox(height: 20),
-          EngineCard(
-            selected: _engineMode == "local",
-            icon: Icons.phone_android,
-            title: "Local (MediaPipe)",
-            subtitle: "Private, offline, runs on your device",
-            onTap: () => setState(() {
-              _engineMode = "local";
-              _engineReady = false;
+          TextField(
+            controller: _onboardApiKeyCtrl,
+            obscureText: !_onboardApiKeyVisible,
+            onChanged: (_) => setState(() {
+              _onboardApiValid = null;
+              _onboardApiError = null;
             }),
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.key_outlined),
+              hintText: "API Key",
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12)),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(_onboardApiKeyVisible
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined),
+                    onPressed: () => setState(
+                        () => _onboardApiKeyVisible = !_onboardApiKeyVisible),
+                    tooltip: "Toggle visibility",
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.content_paste_outlined),
+                    tooltip: "Paste",
+                    onPressed: () async {
+                      final data = await Clipboard.getData(
+                          Clipboard.kTextPlain);
+                      final text = data?.text ?? '';
+                      if (text.isNotEmpty && mounted) {
+                        _onboardApiKeyCtrl.text = text;
+                        setState(() {
+                          _onboardApiValid = null;
+                          _onboardApiError = null;
+                        });
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
           ),
           const SizedBox(height: 12),
-          EngineCard(
-            selected: _engineMode == "cloud",
-            icon: Icons.cloud_outlined,
-            title: "Cloud (Gemini API)",
-            subtitle: "Faster, requires API key",
-            onTap: () => setState(() {
-              _engineMode = "cloud";
-              _engineReady = false;
-            }),
+          DropdownButtonFormField<String>(
+            initialValue: _onboardApiModel,
+            decoration: InputDecoration(
+              labelText: "Model",
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12)),
+              contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 12),
+            ),
+            items: SettingsProvider.apiModels
+                .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                .toList(),
+            onChanged: (v) {
+              if (v != null) {
+                setState(() {
+                  _onboardApiModel = v;
+                  _onboardApiValid = null;
+                });
+              }
+            },
           ),
-          const SizedBox(height: 20),
-          if (_engineMode == "local") ...[
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _pickingModel ? null : _pickLocalModel,
-                icon: _pickingModel
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.folder_open),
-                label: Text(
-                    _pickingModel ? "Copying model…" : "Select .tflite Model"),
-              ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
             ),
-            if (_copying && _copyProgress != null) ...[
-              const SizedBox(height: 8),
-              LinearProgressIndicator(value: _copyProgress),
-            ],
-            if (_engineReady)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    Icon(Icons.check_circle,
-                        color: Colors.green.shade600, size: 20),
-                    const SizedBox(width: 6),
-                    const Text("Model loaded successfully"),
+                    Icon(Icons.lightbulb_outline, color: cs.primary),
+                    const SizedBox(width: 8),
+                    Text("How to get an API key:",
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: cs.onSurface)),
                   ],
                 ),
-              ),
-          ],
-          if (_engineMode == "cloud") ...[
-            DropdownButtonFormField<String>(
-              value: _onboardApiModel,
-              decoration: const InputDecoration(labelText: "Model"),
-              items: SettingsProvider.apiModels
-                  .map((m) => DropdownMenuItem(value: m, child: Text(m)))
-                  .toList(),
-              onChanged: (v) {
-                if (v != null) {
-                  setState(() {
-                    _onboardApiModel = v;
-                    _onboardApiValid = null;
-                    _engineReady = false;
-                  });
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _onboardApiKeyCtrl,
-              obscureText: !_onboardApiKeyVisible,
-              decoration: InputDecoration(
-                labelText: "Gemini API Key",
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: Icon(_onboardApiKeyVisible
-                          ? Icons.visibility_off
-                          : Icons.visibility),
-                      onPressed: () => setState(
-                          () => _onboardApiKeyVisible = !_onboardApiKeyVisible),
-                    ),
-                    IconButton(
-                      icon: _onboardApiValidating
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.check),
-                      onPressed:
-                          _onboardApiValidating ? null : _onboardValidateCloud,
-                    ),
-                  ],
+                const SizedBox(height: 12),
+                ...const [
+                  "Go to Google AI Studio",
+                  "Sign in with your Google account",
+                  'Click "Get API Key"',
+                  "Create a new API key",
+                  "Copy and paste it here",
+                ].asMap().entries.map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 24,
+                            height: 24,
+                            decoration: BoxDecoration(
+                              color:
+                                  cs.onSurface.withValues(alpha: 0.15),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: Text("${e.key + 1}",
+                                style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(e.value)),
+                        ],
+                      ),
+                    )),
+                const Divider(height: 20),
+                GestureDetector(
+                  onTap: () async {
+                    final uri = Uri.parse(
+                        'https://aistudio.google.com/apikey');
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri,
+                          mode: LaunchMode.externalApplication);
+                    }
+                  },
+                  child: Text(
+                    "→ Open Google AI Studio",
+                    style: TextStyle(
+                        color: cs.primary,
+                        fontWeight: FontWeight.w500,
+                        decoration: TextDecoration.underline),
+                  ),
                 ),
-              ),
+              ],
             ),
-            if (_onboardApiValid == true)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Row(
-                  children: [
-                    Icon(Icons.check_circle,
-                        color: Colors.green.shade600, size: 20),
-                    const SizedBox(width: 6),
-                    const Text("API key validated"),
-                  ],
-                ),
-              ),
-            if (_onboardApiValid == false)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
+          ),
+          const SizedBox(height: 12),
+          if (_onboardApiValidating)
+            const Row(children: [
+              SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(width: 10),
+              Text("Validating key…"),
+            ]),
+          if (_onboardApiValid == true)
+            Row(children: [
+              Icon(Icons.check_circle,
+                  color: Colors.green.shade600, size: 20),
+              const SizedBox(width: 6),
+              const Text("API key validated ✓"),
+            ]),
+          if (_onboardApiValid == false)
+            Row(children: [
+              Icon(Icons.error_outline, color: cs.error, size: 20),
+              const SizedBox(width: 6),
+              Expanded(
+                  child: Text(
+                      _onboardApiError ?? "Validation failed",
+                      style: TextStyle(color: cs.error))),
+            ]),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Icon(Icons.settings_outlined,
+                  size: 14,
+                  color: cs.onSurface.withValues(alpha: 0.45)),
+              const SizedBox(width: 6),
+              Expanded(
                 child: Text(
-                  _onboardApiError ?? "Validation failed",
-                  style: TextStyle(color: cs.error),
+                  "You can change all these options anytime in Settings → AI Settings",
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                      color: cs.onSurface.withValues(alpha: 0.45)),
                 ),
               ),
-          ],
-          const SizedBox(height: 24),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: _engineReady ? _goNext : null,
-              style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                textStyle: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w600),
-              ),
-              child: const Text("Continue"),
-            ),
+            ],
           ),
+          const SizedBox(height: 24),
+          _buildNavRow(cs,
+              onBack: _goPrev,
+              onNext: _onboardApiValidating ? null : _onboardSaveAndAdvance,
+              nextLabel: "Get Started"),
         ],
       ),
+    );
+  }
+
+  // ── On-Device Setup ────────────────────────────────────────────────────────
+
+  Widget _buildLocalSetup(ColorScheme cs) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header ──────────────────────────────────────────────────
+          Text(
+            "LOCAL GEMMA MODEL",
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.4,
+              color: cs.primary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            "Set Up On-Device AI",
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.bold,
+              color: cs.onSurface,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            "Download or select a local Gemma model file (.task or .litertlm) to process text entirely on your device — no internet needed.",
+            style: TextStyle(color: cs.onSurface.withValues(alpha: 0.65), height: 1.4),
+          ),
+
+          const SizedBox(height: 28),
+
+          // ── Download section card (shared widget) ─────────────────────
+          ModelDownloadCard(
+            enabled: !_pickingModel,
+            onDownloadingChanged: (v) =>
+                setState(() => _downloadingModel = v),
+            onDownloadSuccess: (_) =>
+                setState(() => _localModelReady = true),
+            onDownloadError: (msg) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Download failed: $msg')),
+              );
+            },
+          ),
+
+          const SizedBox(height: 16),
+
+          // ── Select from file card ────────────────────────────────────
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              border: Border.all(color: cs.outline.withValues(alpha: 0.5)),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "Already have a model?",
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: cs.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "Pick a .task or .litertlm file you downloaded manually.",
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: cs.onSurface.withValues(alpha: 0.6),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: (_downloadingModel || _pickingModel)
+                        ? null
+                        : _pickLocalModel,
+                    icon: _pickingModel
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.folder_open_outlined),
+                    label: Text(_pickingModel ? "Copying model…" : "Select Model File"),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ),
+                if (!_downloadingModel && _copying && _copyProgress != null) ...[
+                  const SizedBox(height: 10),
+                  LinearProgressIndicator(
+                    value: _copyProgress,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ],
+                if (_localModelReady) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Icon(Icons.check_circle_outline,
+                          color: Colors.green.shade600, size: 20),
+                      const SizedBox(width: 8),
+                      const Text("Model loaded successfully"),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Icon(Icons.settings_outlined,
+                  size: 13,
+                  color: cs.onSurface.withValues(alpha: 0.4)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  "You can change the model later in Settings → AI Settings.",
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic,
+                    color: cs.onSurface.withValues(alpha: 0.4),
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 24),
+          if (_downloadingModel) ...[            
+            Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: cs.onSurface.withValues(alpha: 0.4)),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "Please wait for the download to complete",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: cs.onSurface.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          _buildNavRow(cs,
+              onBack: _goPrev,
+              onNext: _downloadingModel ? null : _localSetupAdvance,
+              nextLabel: "Get Started"),
+        ],
+      ),
+    );
+  }
+
+  // ── Shared nav row ─────────────────────────────────────────────────────────
+
+  Widget _buildNavRow(
+    ColorScheme cs, {
+    required VoidCallback? onBack,
+    required VoidCallback? onNext,
+    required String nextLabel,
+  }) {
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton(
+            onPressed: onBack,
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24)),
+            ),
+            child: const Text("Back",
+                style: TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w600)),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 2,
+          child: FilledButton(
+            onPressed: onNext,
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24)),
+              textStyle: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            child: Text(nextLabel),
+          ),
+        ),
+      ],
     );
   }
 
@@ -450,7 +980,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             textAlign: TextAlign.center,
             style: TextStyle(
                 fontSize: 14,
-                color: cs.onSurface.withOpacity(0.7),
+                color: cs.onSurface.withValues(alpha: 0.7),
                 height: 1.5),
           ),
           const SizedBox(height: 28),
@@ -511,7 +1041,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             textAlign: TextAlign.center,
             style: TextStyle(
                 fontSize: 14,
-                color: cs.onSurface.withOpacity(0.7),
+                color: cs.onSurface.withValues(alpha: 0.7),
                 height: 1.5),
           ),
           const SizedBox(height: 28),

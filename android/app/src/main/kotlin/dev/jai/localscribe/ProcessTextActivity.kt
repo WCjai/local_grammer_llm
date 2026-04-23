@@ -584,7 +584,9 @@ $text
         return try {
             llm?.close()
             val visionSupport = getModelVisionSupport(path)
-            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport)
+            val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString("processing_mode", "cpu") ?: "cpu"
+            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport, processingMode)
             currentModelPath = path
             llm
         } catch (e: Exception) {

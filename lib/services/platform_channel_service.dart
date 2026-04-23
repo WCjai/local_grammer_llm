@@ -31,6 +31,17 @@ class LlmChannelService {
     return _channel.invokeMethod<String>("pickModel");
   }
 
+  /// Downloads the model file from [url], saves it to internal storage,
+  /// and sets it as the active model. Progress is emitted via [progressStream].
+  Future<String?> downloadModel(String url) async {
+    return _channel.invokeMethod<String>("downloadModel", {"url": url});
+  }
+
+  /// Cancels an in-progress [downloadModel] call.
+  Future<void> cancelDownload() async {
+    await _channel.invokeMethod("cancelDownload");
+  }
+
   // ── Accessibility / Service ──
 
   Future<bool> isAccessibilityGranted() async {
@@ -135,6 +146,30 @@ class LlmChannelService {
     await _channel.invokeMethod<bool>("setModelSupportsVision", {"enabled": enabled});
   }
 
+  Future<void> deleteModel() async {
+    await _channel.invokeMethod<bool>("deleteModel");
+  }
+
+  Future<String> getProcessingMode() async {
+    final v = await _channel.invokeMethod<String>("getProcessingMode");
+    return v ?? "cpu";
+  }
+
+  /// Sets the processing mode and eagerly tries to (re)build the engine
+  /// with the requested backend. Returns the backend that was actually used
+  /// (e.g. "cpu" if "gpu" was requested but failed to initialise on the device).
+  Future<String> setProcessingMode(String mode) async {
+    final v = await _channel.invokeMethod<String>("setProcessingMode", {"mode": mode});
+    return v ?? mode;
+  }
+
+  /// Requests POST_NOTIFICATIONS permission on Android 13+.
+  /// Returns true if granted (or if not needed on older Android), false if denied.
+  Future<bool> requestNotificationPermission() async {
+    final v = await _channel.invokeMethod<bool>("requestNotificationPermission");
+    return v == true;
+  }
+
   // ── Generation ──
 
   Future<String?> generate(String prompt) async {
@@ -177,5 +212,59 @@ class LlmChannelService {
 
   // ── Progress Stream ──
 
-  Stream<dynamic> get progressStream => _progressChannel.receiveBroadcastStream();
+  // We own a single broadcast controller and subscribe to the EventChannel
+  // exactly once. Every consumer (ModelProvider, ModelDownloadCard,
+  // onboarding, …) receives events through this controller so there's no
+  // chance of a second receiveBroadcastStream() call replacing the channel's
+  // message handler and starving earlier listeners.
+  static final StreamController<dynamic> _progressController =
+      StreamController<dynamic>.broadcast();
+  static bool _progressWired = false;
+
+  /// Last progress event received from native; replayed to new subscribers
+  /// so widgets that mount mid-download (e.g. user navigates back into AI
+  /// Settings) immediately see the in-flight progress instead of an empty
+  /// idle state.
+  static Map<dynamic, dynamic>? _lastProgress;
+  static Map<dynamic, dynamic>? get lastProgress => _lastProgress;
+
+  static void _wireProgress() {
+    if (_progressWired) return;
+    _progressWired = true;
+    _progressChannel.receiveBroadcastStream().listen(
+      (event) {
+        if (event is Map) {
+          final done = event["done"] == true;
+          // Cache the latest event while a download is in flight; clear it
+          // once the stream signals done so a stale "in-progress" snapshot
+          // doesn't resurrect after completion.
+          _lastProgress = done ? null : event;
+        }
+        if (!_progressController.isClosed) _progressController.add(event);
+      },
+      onError: (err, st) {
+        _lastProgress = null;
+        if (!_progressController.isClosed) {
+          _progressController.addError(err, st);
+        }
+      },
+      cancelOnError: false,
+    );
+  }
+
+  Stream<dynamic> get progressStream {
+    _wireProgress();
+    return _progressController.stream;
+  }
+
+  /// Whether a download is currently running on the native side. Used by
+  /// widgets that mount mid-download to restore their UI.
+  Future<bool> isDownloadActive() async {
+    try {
+      final v = await _channel.invokeMethod<bool>("isDownloadActive");
+      return v == true;
+    } catch (_) {
+      return false;
+    }
+  }
 }

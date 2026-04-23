@@ -152,6 +152,7 @@ class CropActivity : Activity() {
     }
 
     private fun deliverResult(cropPath: String?) {
+        android.util.Log.d("LocalScribe", "[CropActivity] deliverResult cropPath=$cropPath serviceDeferred=${TypiLikeAccessibilityService.pendingCropDeferred != null}")
         // Complete the AccessibilityService deferred (if active).
         TypiLikeAccessibilityService.pendingCropDeferred
             ?.takeIf { !it.isCompleted }

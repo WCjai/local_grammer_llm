@@ -5,6 +5,7 @@ import 'package:local_grammer_llm/providers/service_provider.dart';
 import 'package:local_grammer_llm/providers/settings_provider.dart';
 import 'package:local_grammer_llm/providers/commands_provider.dart';
 import 'package:local_grammer_llm/providers/theme_provider.dart';
+import 'package:local_grammer_llm/ui/screens/ai_settings_screen.dart';
 import 'package:local_grammer_llm/ui/screens/chat_screen.dart';
 import 'package:local_grammer_llm/ui/screens/manage_prompts_screen.dart';
 import 'package:local_grammer_llm/ui/screens/demo_screen.dart';
@@ -55,7 +56,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   void _showNotice(String message) {
     if (!mounted) return;
-    final type = message.contains('✓') || message.contains('ready')
+    final type = message.contains('âœ“') || message.contains('ready')
         ? SnackType.success
         : message.toLowerCase().contains('error') ||
                 message.toLowerCase().contains('failed') ||
@@ -111,7 +112,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     color: Theme.of(context)
                         .colorScheme
                         .onSurface
-                        .withOpacity(0.6),
+                        .withValues(alpha: 0.6),
                     letterSpacing: 0.4,
                   ),
             ),
@@ -129,15 +130,15 @@ class _DashboardScreenState extends State<DashboardScreen>
             tooltip: themeProvider.isDark ? 'Light mode' : 'Dark mode',
           ),
         ],
-        leading: Builder(
-          builder: (ctx) => IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => Scaffold.of(ctx).openDrawer(),
-            tooltip: "AI settings",
+        leading: IconButton(
+          icon: const Icon(Icons.settings),
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const AiSettingsScreen()),
           ),
+          tooltip: "AI settings",
         ),
       ),
-      drawer: _buildDrawer(settings, model, busy),
       body: Stack(
         children: [
           Padding(
@@ -169,7 +170,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   Widget _buildServiceCard(
       ServiceProvider service, bool busy, Color green, Color red) {
     return Card(
-      color: (service.serviceEnabled ? green : red).withOpacity(0.20),
+      color: (service.serviceEnabled ? green : red).withValues(alpha: 0.20),
       child: SwitchTheme(
         data: SwitchThemeData(
           thumbColor: WidgetStateProperty.resolveWith(
@@ -179,8 +180,8 @@ class _DashboardScreenState extends State<DashboardScreen>
           ),
           trackColor: WidgetStateProperty.resolveWith(
             (states) => states.contains(WidgetState.selected)
-                ? const Color(0xFF34A853).withOpacity(0.35)
-                : const Color(0xFFEA4335).withOpacity(0.35),
+                ? const Color(0xFF34A853).withValues(alpha: 0.35)
+                : const Color(0xFFEA4335).withValues(alpha: 0.35),
           ),
         ),
         child: SwitchListTile(
@@ -195,7 +196,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     ? "Scribe is ready to help"
                     : "Tap to activate Scribe assistant")
                 : "Android Accessibility permission required",
-            style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
+            style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6)),
           ),
           value: service.serviceEnabled,
           onChanged: busy
@@ -320,7 +321,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               title: const Text("Show preview"),
               subtitle: Text(
                 "Review output before applying changes",
-                style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6)),
               ),
               value: settings.showPreview,
               onChanged: busy
@@ -333,7 +334,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               title: const Text("Show add context window"),
               subtitle: Text(
                 "Optionally add scenario before processing",
-                style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
+                style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6)),
               ),
               value: settings.showContext,
               onChanged: busy
@@ -429,7 +430,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               ),
               const SizedBox(height: 24),
               Text(
-                "Loading AI Model…",
+                "Loading AI Modelâ€¦",
                 style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
@@ -444,421 +445,13 @@ class _DashboardScreenState extends State<DashboardScreen>
                   color: Theme.of(context)
                       .colorScheme
                       .onSurface
-                      .withOpacity(0.6),
+                      .withValues(alpha: 0.6),
                 ),
               ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  Drawer _buildDrawer(SettingsProvider settings, ModelProvider model,
-      bool busy) {
-    final theme = Theme.of(context);
-    final isLocal = settings.apiMode != "online";
-    final isOnline = settings.apiMode != "local";
-
-    return Drawer(
-      child: SafeArea(
-        child: ScrollConfiguration(
-          behavior: const NoGlowScrollBehavior(),
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
-            children: [
-              // ── Header ──
-              Row(
-                children: [
-                  Icon(Icons.tune, color: theme.colorScheme.primary),
-                  const SizedBox(width: 10),
-                  Text(
-                    "AI Settings",
-                    style: theme.textTheme.titleLarge
-                        ?.copyWith(fontWeight: FontWeight.w700),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-
-              // ── Engine Mode (segmented button) ──
-              Text("Engine", style: theme.textTheme.labelMedium?.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
-                fontWeight: FontWeight.w600,
-              )),
-              const SizedBox(height: 8),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final compact = constraints.maxWidth < 320;
-                  return SegmentedButton<String>(
-                    segments: [
-                      ButtonSegment(
-                        value: "local",
-                        label: const Text("Local", softWrap: false),
-                        icon: compact ? null : const Icon(Icons.smartphone),
-                      ),
-                      ButtonSegment(
-                        value: "best",
-                        label: const Text("Auto", softWrap: false),
-                        icon: compact ? null : const Icon(Icons.auto_awesome),
-                      ),
-                      ButtonSegment(
-                        value: "online",
-                        label: const Text("Cloud", softWrap: false),
-                        icon: compact ? null : const Icon(Icons.cloud),
-                      ),
-                    ],
-                    selected: {settings.apiMode},
-                    onSelectionChanged: busy
-                        ? null
-                        : (v) => settings.setApiMode(v.first).catchError((e) {
-                              _showNotice("Mode error: $e");
-                            }),
-                    showSelectedIcon: false,
-                    style: ButtonStyle(
-                      visualDensity: compact
-                          ? VisualDensity.compact
-                          : VisualDensity.standard,
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // ── Cloud Mode ──
-              _drawerSection(
-                theme: theme,
-                icon: Icons.cloud,
-                title: "Cloud API",
-                enabled: isOnline,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    DropdownButtonFormField<String>(
-                      value: settings.apiModel,
-                      decoration: const InputDecoration(
-                        labelText: "Model",
-                        isDense: true,
-                        border: OutlineInputBorder(),
-                      ),
-                      items: SettingsProvider.apiModels
-                          .map((m) =>
-                              DropdownMenuItem(value: m, child: Text(m)))
-                          .toList(),
-                      onChanged: (busy || !isOnline)
-                          ? null
-                          : (v) => settings
-                              .setApiModel(v ?? settings.apiModel)
-                              .catchError((e) {
-                              _showNotice("Model error: $e");
-                            }),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: settings.apiKeyCtrl,
-                      obscureText: !settings.apiKeyVisible,
-                      decoration: InputDecoration(
-                        labelText: "API Key",
-                        isDense: true,
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          onPressed: () => settings.toggleApiKeyVisible(),
-                          icon: Icon(
-                            settings.apiKeyVisible
-                                ? Icons.visibility_off
-                                : Icons.visibility,
-                            size: 20,
-                          ),
-                          tooltip: settings.apiKeyVisible
-                              ? "Hide key"
-                              : "Show key",
-                        ),
-                      ),
-                      onChanged: (_) => settings.clearValidation(),
-                    ),
-                    const SizedBox(height: 10),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: settings.apiValid == true
-                              ? Colors.green
-                              : (settings.apiValid == false
-                                  ? Colors.red
-                                  : theme.colorScheme.primary),
-                        ),
-                        onPressed: (settings.apiValidating || !isOnline)
-                            ? null
-                            : () => settings.validateApiKey().catchError((e) {
-                                  _showNotice("Validation error: $e");
-                                }),
-                        icon: settings.apiValidating
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                              )
-                            : Icon(
-                                settings.apiValid == true
-                                    ? Icons.check
-                                    : (settings.apiValid == false
-                                        ? Icons.close
-                                        : Icons.vpn_key),
-                                size: 18,
-                              ),
-                        label: Text(
-                          settings.apiValid == true
-                              ? "Verified"
-                              : (settings.apiValid == false
-                                  ? "Invalid"
-                                  : "Validate Key"),
-                        ),
-                      ),
-                    ),
-                    if (settings.apiError != null) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        settings.apiError!,
-                        style: theme.textTheme.labelSmall
-                            ?.copyWith(color: Colors.red),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-
-              // ── Local Mode ──
-              _drawerSection(
-                theme: theme,
-                icon: Icons.smartphone,
-                title: "Local Model",
-                enabled: isLocal,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            model.modelName.isEmpty
-                                ? "No model loaded"
-                                : model.modelName,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              fontWeight: FontWeight.w500,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton.tonalIcon(
-                          onPressed: (busy || !isLocal)
-                              ? null
-                              : () async {
-                                  final msg = await model.pickModel();
-                                  if (msg != null) _showNotice(msg);
-                                },
-                          icon: Icon(
-                            model.hasModel ? Icons.swap_horiz : Icons.download,
-                            size: 18,
-                          ),
-                          label: Text(model.hasModel ? "Change" : "Pick"),
-                        ),
-                      ],
-                    ),
-                    if (model.hasModel)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Row(
-                          children: [
-                            Icon(Icons.check_circle, size: 14, color: Colors.green.shade600),
-                            const SizedBox(width: 4),
-                            Text("Ready", style: theme.textTheme.labelSmall?.copyWith(
-                              color: Colors.green.shade600,
-                            )),
-                          ],
-                        ),
-                      ),
-                    if (model.copying) ...[
-                      const SizedBox(height: 12),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: LinearProgressIndicator(
-                          value: (model.copyProgress == null ||
-                                  model.copyProgress!.isNaN)
-                              ? null
-                              : model.copyProgress,
-                          minHeight: 6,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        model.copyProgress == null
-                            ? "Copying model…"
-                            : "Copying… ${(model.copyProgress! * 100).toStringAsFixed(0)}%",
-                        style: theme.textTheme.labelSmall,
-                      ),
-                    ],
-                    const Divider(height: 24),
-                    Text("Token Limits", style: theme.textTheme.labelMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    )),
-                    const SizedBox(height: 2),
-                    Text(
-                      "Controls how much text the on-device model processes",
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    _tokenSlider(
-                      label: "Max Tokens",
-                      value: settings.maxTokens,
-                      min: 256,
-                      max: 2048,
-                      divisions: 14,
-                      enabled: !busy && isLocal,
-                      onChanged: (v) => settings.setMaxTokens(v),
-                      theme: theme,
-                    ),
-                    const SizedBox(height: 4),
-                    _tokenSlider(
-                      label: "Output Tokens",
-                      value: settings.outputTokens,
-                      min: 64,
-                      max: (settings.maxTokens - 64).clamp(64, 512).toDouble(),
-                      divisions: ((settings.maxTokens - 64).clamp(64, 512) - 64) ~/ 32,
-                      enabled: !busy && isLocal,
-                      onChanged: (v) => settings.setOutputTokens(v),
-                      theme: theme,
-                    ),
-                    const Divider(height: 24),
-                    SwitchListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        "Model supports image processing?",
-                        style: theme.textTheme.bodyMedium,
-                      ),
-                      subtitle: Text(
-                        "Enable to allow attaching screenshots to prompts. Turn on only if your local model accepts image input.",
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-                        ),
-                      ),
-                      value: settings.modelSupportsVision,
-                      onChanged: (busy || !isLocal)
-                          ? null
-                          : (v) => settings.setModelSupportsVision(v).catchError((e) {
-                                _showNotice("Error: $e");
-                              }),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ── Drawer helpers ──
-
-  Widget _drawerSection({
-    required ThemeData theme,
-    required IconData icon,
-    required String title,
-    required bool enabled,
-    required Widget child,
-  }) {
-    return AnimatedOpacity(
-      opacity: enabled ? 1.0 : 0.45,
-      duration: const Duration(milliseconds: 200),
-      child: IgnorePointer(
-        ignoring: !enabled,
-        child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: theme.dividerColor.withValues(alpha: 0.4),
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(icon, size: 18, color: theme.colorScheme.primary),
-                  const SizedBox(width: 8),
-                  Text(title, style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  )),
-                ],
-              ),
-              const SizedBox(height: 12),
-              child,
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _tokenSlider({
-    required String label,
-    required int value,
-    required double min,
-    required double max,
-    required int divisions,
-    required bool enabled,
-    required ValueChanged<int> onChanged,
-    required ThemeData theme,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label, style: theme.textTheme.bodySmall),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primaryContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                "$value",
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: theme.colorScheme.onPrimaryContainer,
-                ),
-              ),
-            ),
-          ],
-        ),
-        SliderTheme(
-          data: SliderThemeData(
-            trackHeight: 4,
-            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-            overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-          ),
-          child: Slider(
-            value: value.toDouble().clamp(min, max),
-            min: min,
-            max: max,
-            divisions: divisions > 0 ? divisions : 1,
-            onChanged: enabled ? (v) => onChanged(v.round()) : null,
-          ),
-        ),
-      ],
     );
   }
 

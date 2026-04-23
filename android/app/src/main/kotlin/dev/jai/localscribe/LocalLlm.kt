@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
+import com.google.mediapipe.tasks.genai.llminference.LlmInference.Backend as MpBackend
 import com.google.ai.edge.litertlm.Backend as LiteRtBackend
 import com.google.ai.edge.litertlm.Engine as LiteRtEngine
 import com.google.ai.edge.litertlm.EngineConfig as LiteRtEngineConfig
@@ -20,6 +21,10 @@ import java.io.File
 interface LocalLlm {
     /** Whether this model instance supports multimodal (image) input. */
     val supportsVision: Boolean
+
+    /** The backend that was actually used to create this engine ("cpu" or "gpu"). */
+    val activeBackend: String
+        get() = "cpu"
 
     /** Runs one-shot text-only generation and returns the model's raw response text. */
     fun generate(prompt: String): String
@@ -65,15 +70,58 @@ object LocalLlmFactory {
         modelPath: String,
         maxTokens: Int,
         supportsVision: Boolean = detectVisionCapability(modelPath),
+        processingMode: String = "cpu",
     ): LocalLlm {
         val ext = File(modelPath).extension.lowercase()
         return when (ext) {
-            "task" -> MediaPipeLocalLlm(context, modelPath, maxTokens, supportsVision)
-            "litertlm" -> LiteRtLmLocalLlm(modelPath, maxTokens, supportsVision)
+            "task" -> createMediaPipeWithFallback(context, modelPath, maxTokens, supportsVision, processingMode)
+            "litertlm" -> createLiteRtWithFallback(modelPath, maxTokens, supportsVision, processingMode)
             else -> throw IllegalStateException(
                 "Unsupported model format: .$ext (expected .task or .litertlm)"
             )
         }
+    }
+
+    /** GPU init can fail or hard-crash on some devices; transparently fall back to CPU. */
+    private fun createLiteRtWithFallback(
+        modelPath: String,
+        maxTokens: Int,
+        supportsVision: Boolean,
+        processingMode: String,
+    ): LocalLlm {
+        if (processingMode == "gpu") {
+            try {
+                return LiteRtLmLocalLlm(modelPath, maxTokens, supportsVision, "gpu")
+            } catch (t: Throwable) {
+                Log.w(
+                    "LocalScribe",
+                    "LiteRT-LM GPU init failed (${t.message}); falling back to CPU.",
+                    t,
+                )
+            }
+        }
+        return LiteRtLmLocalLlm(modelPath, maxTokens, supportsVision, "cpu")
+    }
+
+    private fun createMediaPipeWithFallback(
+        context: Context,
+        modelPath: String,
+        maxTokens: Int,
+        supportsVision: Boolean,
+        processingMode: String,
+    ): LocalLlm {
+        if (processingMode == "gpu") {
+            try {
+                return MediaPipeLocalLlm(context, modelPath, maxTokens, supportsVision, "gpu")
+            } catch (t: Throwable) {
+                Log.w(
+                    "LocalScribe",
+                    "MediaPipe GPU init failed (${t.message}); falling back to CPU.",
+                    t,
+                )
+            }
+        }
+        return MediaPipeLocalLlm(context, modelPath, maxTokens, supportsVision, "cpu")
     }
 }
 
@@ -82,14 +130,19 @@ private class MediaPipeLocalLlm(
     modelPath: String,
     maxTokens: Int,
     override val supportsVision: Boolean,
+    processingMode: String = "cpu",
 ) : LocalLlm {
+    override val activeBackend: String = processingMode
     private var engine: LlmInference? = run {
-        val options = LlmInferenceOptions.builder()
+        val builder = LlmInferenceOptions.builder()
             .setModelPath(modelPath)
             .setMaxTokens(maxTokens)
             .setMaxTopK(100)
-            .build()
-        LlmInference.createFromOptions(context.applicationContext, options)
+        // setPreferredBackend is only available in newer tasks-genai builds; guard with reflection-safe call
+        builder.setPreferredBackend(
+            if (processingMode == "gpu") MpBackend.GPU else MpBackend.CPU
+        )
+        LlmInference.createFromOptions(context.applicationContext, builder.build())
     }
 
     override fun generate(prompt: String): String {
@@ -127,15 +180,23 @@ private class LiteRtLmLocalLlm(
     modelPath: String,
     @Suppress("UNUSED_PARAMETER") maxTokens: Int,
     override val supportsVision: Boolean,
+    processingMode: String = "cpu",
 ) : LocalLlm {
+    override val activeBackend: String = processingMode
     private var engine: LiteRtEngine? = null
 
     init {
+        val backend = if (processingMode == "gpu") LiteRtBackend.GPU() else LiteRtBackend.CPU()
+        Log.i(
+            "LocalScribe",
+            "[LiteRT] Initializing engine: backend=$processingMode, supportsVision=$supportsVision, " +
+                "visionBackend=${if (supportsVision) processingMode else "null (text-only)"}"
+        )
         val config = LiteRtEngineConfig(
             modelPath = modelPath,
-            backend = LiteRtBackend.CPU(),
+            backend = backend,
             // Enable vision backend only for models that support it.
-            visionBackend = if (supportsVision) LiteRtBackend.CPU() else null,
+            visionBackend = if (supportsVision) backend else null,
             // maxNumTokens must be null — passing an explicit value triggers LiteRT-LM's
             // magic-number replacement which mismatches the RESHAPE op's output shape spec,
             // causing "num_input_elements != num_output_elements" at inference time.
@@ -144,6 +205,7 @@ private class LiteRtLmLocalLlm(
         val e = LiteRtEngine(config)
         e.initialize()
         engine = e
+        Log.i("LocalScribe", "[LiteRT] Engine initialized successfully")
     }
 
     override fun generate(prompt: String): String {
@@ -156,11 +218,30 @@ private class LiteRtLmLocalLlm(
     }
 
     override fun generate(prompt: String, images: List<Bitmap>): String {
-        if (images.isEmpty() || !supportsVision) return generate(prompt)
+        if (images.isEmpty()) {
+            Log.d("LocalScribe", "[LiteRT] No images provided, falling back to text-only")
+            return generate(prompt)
+        }
+        if (!supportsVision) {
+            Log.w(
+                "LocalScribe",
+                "[LiteRT] Image(s) provided but engine was built with visionBackend=null. " +
+                    "Re-pick the model with 'Image input support' enabled in AI Settings."
+            )
+            return generate(prompt)
+        }
         val e = engine ?: throw IllegalStateException("LiteRT-LM engine is closed")
+        // Google's reference (gallery/LlmChatModelHelper.kt) uses PNG bytes for Content.ImageBytes —
+        // the native LiteRT-LM image decoder expects lossless PNG, not JPEG. Using JPEG silently
+        // produces an unusable image (the model behaves as if no image was attached).
+        val bmp = images.first()
         val bmpStream = ByteArrayOutputStream()
-        images.first().compress(Bitmap.CompressFormat.PNG, 100, bmpStream)
+        bmp.compress(Bitmap.CompressFormat.PNG, 100, bmpStream)
         val imgBytes = bmpStream.toByteArray()
+        Log.d(
+            "LocalScribe",
+            "[LiteRT] Sending image to model: ${bmp.width}x${bmp.height}, pngBytes=${imgBytes.size}"
+        )
         return e.createConversation().use { conversation ->
             conversation.sendMessage(
                 LiteRtContents.of(

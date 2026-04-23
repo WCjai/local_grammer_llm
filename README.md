@@ -35,7 +35,7 @@ Local Scribe is a Flutter application designed as a personal writing assistant. 
 
 **Dual LLM modes:**
 - **Local mode** — Uses Google MediaPipe's `LlmInference` engine with `.task` or `.litertlm` model files stored on-device. Fully offline, no data leaves the phone.
-- **Online mode** — Calls the Google Gemini API (`v1beta generateContent` endpoint) with user-provided API key. Supports models: `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`, `gemma-3n-e2b-it`, `gemma-3n-e4b-it`.
+- **Online mode** — Calls the Google Gemini API (`v1beta generateContent` endpoint) with user-provided API key. Supports models: `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`, `gemma-3n-e2b-it`, `gemma-3n-e4b-it`, `gemma-4-31b-it`, `gemma-4-26b-a4b-it`.
 - **Best mode** — Tries online first, falls back to local if network is unavailable.
 
 ---
@@ -244,7 +244,7 @@ Example:
 
 - System-wide text interception via Android Accessibility Service
 - On-device LLM inference (Google MediaPipe `.task`/`.litertlm` models)
-- Online LLM via Google Gemini API (5 model choices)
+- Online LLM via Google Gemini API (7 model choices)
 - Smart mode switching: Local only / Online only / Use the Best
 - 12 built-in text transformation commands
 - Custom prompt CRUD (create, read, update, delete)
@@ -255,6 +255,10 @@ Example:
 - API key validation with visual feedback
 - Cached command descriptions using LLM-generated summaries
 - PROCESS_TEXT intent: highlight text in any app → pick a command from a bottom-sheet overlay → apply or copy result
+- Vision/image input support for compatible models (via screenshot capture in ProcessText flow)
+- Configurable token limits (max tokens, output tokens) via settings drawer
+- Full light + dark mode support across all screens and the PROCESS_TEXT overlay
+- First-launch onboarding wizard (engine setup + accessibility permission)
 - Material 3 purple-themed UI
 
 ---
@@ -268,7 +272,7 @@ The core feature. `TypiLikeAccessibilityService` (extends `AccessibilityService`
 Uses `com.google.mediapipe:tasks-genai:0.10.27` for local inference. Users pick a `.task` or `.litertlm` model file via the in-app file picker, which copies it to internal storage. LLM config: `maxTokens=512`, `topK=100`, reserved output tokens = 128. The model is initialized on-demand and shared between `MainActivity` (for chat/description generation) and `TypiLikeAccessibilityService` (for text processing).
 
 ### Online Gemini API
-Calls `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` with `X-Goog-Api-Key` header. Supports 5 models. API key is validated by sending a test "ping" request. The app checks network connectivity before attempting online calls.
+Calls `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` with `X-Goog-Api-Key` header. Supports 7 models: `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`, `gemma-3n-e2b-it`, `gemma-3n-e4b-it`, `gemma-4-31b-it`, `gemma-4-26b-a4b-it`. API key is validated by sending a test "ping" request. The app checks network connectivity before attempting online calls.
 
 ### Custom Prompts
 Users can create custom commands with their own keyword and prompt text. Custom prompts are stored as a JSON object in `SharedPreferences` under the `custom_prompts` key. Built-in keywords (12 reserved words) cannot be overridden. The prompt text should contain `{text}` as a placeholder for user input.
@@ -326,7 +330,9 @@ Android's `ACTION_PROCESS_TEXT` intent allows apps to register as text processor
 | `getPrompts` | — | `List<Map>` | Get all prompts (built-in + custom) |
 | `getShowPreview` | — | `bool` | Get preview setting |
 | `getShowContext` | — | `bool` | Get context window setting |
-| `generate` | `text, command, arg?, context?` | `String` | Build prompt, run LLM, post-process, return result |
+| `getModelSupportsVision` | — | `bool` | Check whether the loaded model supports image input |
+| `generate` | `text, command, arg?, context?, imagePath?` | `String` | Build prompt, run LLM, post-process, return result. `imagePath` enables vision input. |
+| `captureScreenshot` | — | `String?` | Trigger AccessibilityService screenshot + crop activity. Returns crop file path or null. |
 | `finishWithResult` | `text: String` | `bool` | Return processed text to source app via `RESULT_OK` |
 | `dismiss` | — | `bool` | Cancel and close the activity |
 
@@ -343,49 +349,62 @@ The `EXTRA_PROCESS_TEXT_READONLY` flag from the intent determines whether the so
 | Aspect | Detail |
 |---|---|
 | **Framework** | Flutter 3.10.8+ with Dart |
-| **State management** | Pure `setState()` — no Riverpod, Bloc, or Provider |
-| **Code structure** | Single-file monolith: all Dart code in `lib/main.dart` (~2,250 lines) |
+| **State management** | `provider` package — `ChangeNotifier`-based providers (`ModelProvider`, `ServiceProvider`, `SettingsProvider`, `CommandsProvider`, `ThemeProvider`) |
+| **Code structure** | Multi-file: entry point in `lib/main.dart`, app shell in `lib/app.dart`, screens in `lib/ui/screens/`, widgets in `lib/ui/widgets/`, providers in `lib/providers/`, services in `lib/services/`, models in `lib/models/` |
 | **Navigation** | Imperative `Navigator.push()` with `MaterialPageRoute` |
 | **Platform bridge** | `MethodChannel('local_llm')` for request/response + `EventChannel('local_llm_progress')` for streaming + `MethodChannel('process_text')` for PROCESS_TEXT flow |
 | **Native code** | Kotlin — `MainActivity.kt` (~850 lines) + `TypiLikeAccessibilityService.kt` (~1,000 lines) + `ProcessTextActivity.kt` (~310 lines) |
 | **Persistence** | Android `SharedPreferences` (`local_llm_prefs`) for all settings, model path, custom prompts, API config |
-| **Flutter persistence** | `shared_preferences` package for caching LLM-generated command descriptions |
+| **Flutter persistence** | `shared_preferences` package for caching LLM-generated command descriptions, onboarding state, dark mode preference, and chat history |
 | **LLM engine** | Google MediaPipe `LlmInference` (on-device) + Google Gemini API (online) |
-| **UI theme** | Material 3, purple `ColorScheme` (#6C4AD5 primary), light mode only |
+| **UI theme** | Material 3, purple `ColorScheme` (#6C4AD5 primary light / #9B80E8 dark), full light + dark mode support |
 | **Overlay system** | Android `WindowManager` with `TYPE_ACCESSIBILITY_OVERLAY` for loading/preview/context UIs |
 
 ---
 
 ## Screens & Navigation
 
-The app has **4 screens**, navigated via `Navigator.push()`:
+The app has **5 main screens** plus a secondary process-text screen, navigated via `Navigator.push()`:
 
-### 1. Dashboard (`LlmDemoPage`) — Main Screen
-- AppBar: "LocalScribe" title with "made for jAi ONLY" subtitle
-- Settings drawer (gear icon): AI mode dropdown, local model picker, online API config with key validation
-- Accessibility service toggle card (green when active, red when off)
-- Two action buttons: "Prompt Generator" → ChatPage, "Manage Prompts" → ManagePromptsPage
-- "How to use?" → DemoPage (disabled until service is enabled)
+### 0. Onboarding (`OnboardingScreen`) — First-launch only
+- Shown once when `has_completed_onboarding` pref is `false`
+- **Page 1 — Engine:** Choose Local or Cloud (Online) mode. Local: file picker to copy a `.task`/`.litertlm` model. Cloud: select Gemini model, enter API key, validate.
+- **Page 2 — Accessibility:** Prompts user to enable the accessibility service with a live status indicator. Automatically advances when permission is granted.
+- On completion, sets `has_completed_onboarding = true` and navigates to `DashboardScreen`.
+
+### 1. Dashboard (`DashboardScreen`) — Main Screen
+- AppBar: "Local Scribe" title + dark/light mode toggle (sun/moon icon via `ThemeProvider`)
+- Settings drawer (gear icon): AI mode dropdown, local model picker with copy progress, online API config (model selector, API key field, validate button), configurable max/output token sliders, vision support toggle
+- Accessibility service toggle card (color-coded: green when active, red when off)
+- Two action buttons: "Prompt Generator" → `ChatScreen` (BETA tag), "Manage Prompts" → `ManagePromptsScreen`
+- "How to use?" → `DemoScreen` (disabled until service is enabled)
 - Settings card: "Show preview" and "Show add context window" toggles
-- Available commands grid: two-column layout of all built-in + custom commands with descriptions
+- Available commands grid: two-column layout of all built-in + custom commands with LLM-generated descriptions
 
-### 2. Chat / Prompt Generator (`ChatPage`) — BETA
+### 2. Chat / Prompt Generator (`ChatScreen`) — BETA
 - Chat-style interface with user (right, purple) and assistant (left) message bubbles
-- Users describe what prompts they want; LLM generates keyword/label/prompt suggestions
+- Users describe what prompts they want; LLM generates 3–5 keyword/label/prompt suggestions
 - Suggestion cards with "Add" button to save as custom commands
-- Static message cache persists across navigation (not across app restarts)
+- Chat history persisted across sessions via `SharedPreferences` (`prompt_gen_history` key)
 
-### 3. Demo Page (`DemoPage`)
+### 3. Demo Screen (`DemoScreen`)
 - Quick tutorial with usage instructions
 - Command buttons (`?fix`, `?rewrite`, `?summ`, `?polite`, `?casual`) for quick reference
 - Real-time command detection regex display
 - Test text field for experimentation
 
-### 4. Manage Prompts (`ManagePromptsPage`)
+### 4. Manage Prompts (`ManagePromptsScreen`)
 - ListView of all prompts — custom prompts first, then built-in (marked "Default")
 - Built-in prompts are read-only; custom prompts have edit/delete icons
 - FAB to add new prompt via dialog (keyword + prompt text fields)
-- Keyword validation: 3–20 chars, lowercase, no reserved words
+- Keyword validation: 3–20 chars, lowercase letters/numbers/underscore, no reserved words
+
+### 5. Process Text (`ProcessTextScreen`) — Secondary Entry Point
+- Launched via `processTextMain()` secondary entry point
+- Transparent overlay bottom sheet over the source app
+- Command grid → loading spinner → result preview with Apply/Copy/Back buttons
+- Optional context input and image capture (vision-capable models)
+- Respects the app's dark/light mode preference from SharedPreferences
 
 ---
 
@@ -393,15 +412,63 @@ The app has **4 screens**, navigated via `Navigator.push()`:
 
 ```
 local_grammer_llm/
-├── pubspec.yaml                          # Flutter project config, dependencies, SDK constraint ^3.10.8
+├── pubspec.yaml                          # Flutter project config; deps: provider ^6.1.2, shared_preferences ^2.2.3; SDK ^3.10.8
 ├── analysis_options.yaml                 # Lint rules (flutter_lints/flutter.yaml)
-├── devtools_options.yaml                 # DevTools config (empty)
+├── devtools_options.yaml                 # DevTools config
 ├── README.md                             # This file
 │
 ├── lib/
-│   └── main.dart                         # ALL Dart code (~2,700 lines): 4 screens + ProcessTextPage,
-│                                         #   platform channel calls, LLM prompt parsing, JSON repair,
-│                                         #   theme config, state management, processTextMain entry point
+│   ├── main.dart                         # App entry point: initialises SharedPreferences, sets up
+│   │                                     #   MultiProvider with all 5 providers, boots App widget.
+│   │                                     #   Also exports processTextMain() entry point.
+│   ├── app.dart                          # App widget: MaterialApp with full light + dark ColorScheme,
+│   │                                     #   Material 3 theme, routes to OnboardingScreen or DashboardScreen.
+│   │
+│   ├── models/
+│   │   ├── chat_message.dart             # ChatMessage (role, text, suggestions) + PromptSuggestion
+│   │   └── prompt_models.dart            # CommandInfo, PromptSpec, PromptEntry
+│   │
+│   ├── providers/
+│   │   ├── model_provider.dart           # ModelProvider: LLM init, model file pick/copy, progress stream
+│   │   ├── service_provider.dart         # ServiceProvider: accessibility grant check, service enable/disable
+│   │   ├── settings_provider.dart        # SettingsProvider: API mode/model/key, token config, preview/context
+│   │   │                                 #   toggles, vision flag. Supported models:
+│   │   │                                 #   gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro,
+│   │   │                                 #   gemma-3n-e2b-it, gemma-3n-e4b-it, gemma-4-31b-it, gemma-4-26b-a4b-it
+│   │   ├── commands_provider.dart        # CommandsProvider: loads built-in + custom commands, generates
+│   │   │                                 #   LLM descriptions, caches to SharedPreferences
+│   │   └── theme_provider.dart           # ThemeProvider: light/dark toggle, persisted via SharedPreferences
+│   │
+│   ├── services/
+│   │   ├── platform_channel_service.dart # LlmChannelService: wraps MethodChannel('local_llm') +
+│   │   │                                 #   EventChannel('local_llm_progress'). All model, service,
+│   │   │                                 #   settings, prompt CRUD, and generation calls.
+│   │   ├── preferences_service.dart      # PreferencesService: Flutter-side SharedPreferences wrapper.
+│   │   │                                 #   Manages onboarding flag, command description cache.
+│   │   └── process_text_channel.dart     # ProcessTextChannelService: wraps MethodChannel('process_text').
+│   │                                     #   getProcessTextData, getPrompts, generate (with optional
+│   │                                     #   imagePath for vision), captureScreenshot, finishWithResult, dismiss.
+│   │
+│   └── ui/
+│       ├── screens/
+│       │   ├── dashboard_screen.dart     # Main screen: service toggle, model status, command grid,
+│       │   │                             #   settings drawer, navigation to chat/prompts/demo
+│       │   ├── onboarding_screen.dart    # First-launch wizard: engine setup + accessibility grant
+│       │   ├── chat_screen.dart          # Prompt Generator BETA: chat UI, LLM suggestion parsing,
+│       │   │                             #   JSON repair, history persistence via SharedPreferences
+│       │   ├── demo_screen.dart          # Tutorial screen with test text field
+│       │   ├── manage_prompts_screen.dart# Prompt CRUD: list, add, edit, delete custom prompts
+│       │   └── process_text_screen.dart  # ProcessText overlay: command grid, result preview,
+│       │                                 #   Apply/Copy actions, dark mode sync, vision image capture
+│       │
+│       └── widgets/
+│           ├── app_snackbar.dart         # Typed snack bar helper (success / error / info styles)
+│           ├── beta_tag.dart             # Small "BETA" label chip
+│           ├── command_item.dart         # Single command card (icon, keyword, description)
+│           ├── command_row.dart          # Row layout wrapper for command grid items
+│           ├── engine_card.dart          # Selectable card for Local / Cloud engine choice (onboarding)
+│           ├── no_glow_scroll.dart       # ScrollBehavior that removes overscroll glow
+│           └── suggestions_list.dart    # Renders LLM prompt suggestions with Add action
 │
 ├── test/
 │   └── widget_test.dart                  # Smoke test (OUTDATED — references old UI text)
@@ -424,7 +491,8 @@ local_grammer_llm/
 │               │   ├── ProcessTextActivity.kt    # PROCESS_TEXT intent handler (~310 lines):
 │               │   │                             #   FlutterActivity with transparent theme,
 │               │   │                             #   processTextMain Dart entry point,
-│               │   │                             #   MethodChannel('process_text'), LLM generation
+│               │   │                             #   MethodChannel('process_text'), LLM generation,
+│               │   │                             #   vision/screenshot support
 │               │   └── TypiLikeAccessibilityService.kt  # Core accessibility service (~1,000 lines):
 │               │                                        #   text interception, command regex parsing,
 │               │                                        #   overlay UI (loading/preview/context),
@@ -435,50 +503,17 @@ local_grammer_llm/
 │                   │   └── llm_overlay.xml        # Overlay layout: loading spinner, preview card, context dialog
 │                   ├── xml/
 │                   │   └── typi_like_accessibility_config.xml  # Accessibility event types & flags config
-│                   ├── drawable/
-│                   │   ├── apply_rect.xml         # Apply button background (rounded rect)
-│                   │   ├── apply_circle.xml       # Apply button background (circle)
-│                   │   ├── cancel_rect.xml        # Cancel button background (rounded rect)
-│                   │   ├── cancel_circle.xml      # Cancel button background (circle)
-│                   │   ├── overlay_card.xml       # Overlay card background
-│                   │   └── launch_background.xml  # Launch splash background
-│                   ├── drawable-v21/
-│                   │   └── launch_background.xml  # API 21+ launch splash
+│                   ├── drawable/                  # Button and card background drawables
 │                   ├── values/
 │                   │   ├── strings.xml            # App name "Local Scribe", accessibility description
-│                   │   └── styles.xml             # Launch theme, normal theme (light), ProcessTextTheme
+│                   │   └── styles.xml             # Launch theme, normal theme, ProcessTextTheme (light)
 │                   └── values-night/
 │                       └── styles.xml             # Dark mode launch theme, ProcessTextTheme
 │
 ├── ios/                                  # iOS platform files (standard Flutter template)
-│   ├── Runner/
-│   │   ├── AppDelegate.swift
-│   │   ├── Info.plist                    # Bundle name "Local Scribe", orientation config
-│   │   └── Assets.xcassets/
-│   └── Runner.xcodeproj/
-│
-├── web/                                  # Web platform files
-│   ├── index.html                        # Title "Local Scribe", Flutter web bootstrap
-│   └── manifest.json                     # PWA config: "Local Scribe", portrait, #0175C2 theme
-│
 ├── macos/                                # macOS platform files (standard Flutter template)
-│   └── Runner/
-│       ├── AppDelegate.swift
-│       ├── MainFlutterWindow.swift
-│       ├── Info.plist
-│       ├── DebugProfile.entitlements     # App sandbox + JIT + network
-│       └── Release.entitlements          # App sandbox only
-│
-├── linux/                                # Linux platform files (standard Flutter template)
-│   └── runner/
-│       ├── main.cc
-│       ├── my_application.cc
-│       └── my_application.h
-│
-└── windows/                              # Windows platform files
-    └── runner/
-        ├── main.cpp                      # Window title "Local Scribe", 1280×720 default size
-        └── flutter_window.cpp
+└── assets/
+    └── tutorial/                         # Tutorial assets for the Demo screen
 ```
 
 ---
@@ -510,6 +545,12 @@ All Flutter ↔ native communication goes through `MethodChannel('local_llm')` a
 | `setApiKey` | `key: String` | `bool` | Save Gemini API key |
 | `validateApiKey` | `model: String, key: String` | `bool` | Validate API key by making a test request |
 | `openAccessibilitySettings` | — | `bool` | Open Android accessibility settings screen |
+| `getMaxTokens` | — | `int` | Get configured max token count |
+| `setMaxTokens` | `value: int` | `bool` | Set max token count |
+| `getOutputTokens` | — | `int` | Get reserved output token count |
+| `setOutputTokens` | `value: int` | `bool` | Set reserved output token count |
+| `getModelSupportsVision` | — | `bool` | Get vision support toggle state |
+| `setModelSupportsVision` | `enabled: bool` | `bool` | Set vision support toggle |
 | `getPrompts` | — | `List<Map>` | Get all prompts (built-in + custom) with keyword, prompt, builtIn flag |
 | `addPrompt` | `keyword: String, prompt: String` | `bool` | Add a custom prompt (rejects built-in keywords) |
 | `updatePrompt` | `keyword: String, prompt: String, oldKeyword: String?` | `bool` | Update a custom prompt (supports keyword rename) |
@@ -559,7 +600,7 @@ The core accessibility service. Key responsibilities:
 - Notification timeout: 100ms
 
 ### ProcessTextActivity.kt (~310 lines)
-Handles Android's `ACTION_PROCESS_TEXT` intent. Extends `FlutterActivity` with a transparent background and a secondary Dart entry point (`processTextMain`). Communicates with Flutter via `MethodChannel('process_text')`. Contains its own LLM generation pipeline (same prompt building, output processing, and local/online/best routing as `TypiLikeAccessibilityService`). Reads settings from the same `SharedPreferences` (`local_llm_prefs`). Returns processed text to the source app via `setResult(RESULT_OK, intent)` with `EXTRA_PROCESS_TEXT`.
+Handles Android's `ACTION_PROCESS_TEXT` intent. Extends `FlutterActivity` with a transparent background and a secondary Dart entry point (`processTextMain`). Communicates with Flutter via `MethodChannel('process_text')`. Contains its own LLM generation pipeline (same prompt building, output processing, and local/online/best routing as `TypiLikeAccessibilityService`). Reads settings from the same `SharedPreferences` (`local_llm_prefs`). Returns processed text to the source app via `setResult(RESULT_OK, intent)` with `EXTRA_PROCESS_TEXT`. Also exposes `captureScreenshot` for AccessibilityService-triggered crop and `getModelSupportsVision` for vision-capable model detection. Pushes `onNewText` method calls to the Flutter layer to re-render the overlay when the source text changes.
 
 ### Overlay Layout (llm_overlay.xml)
 Full-screen overlay containing three swappable card views: loading (progress spinner + cancel), preview (ScrollView text + Apply/Cancel buttons), and context (EditText input + Add/Cancel buttons). Max height constrained to 60% of screen.
@@ -592,8 +633,8 @@ Full-screen overlay containing three swappable card views: loading (progress spi
 | Package | Version | Purpose |
 |---|---|---|
 | `flutter` (sdk) | — | Core framework |
-| `cupertino_icons` | `^1.0.8` | iOS-style icons |
-| `shared_preferences` | `^2.2.3` | Local key-value storage for caching command descriptions |
+| `provider` | `^6.1.2` | State management (`ChangeNotifier`-based providers) |
+| `shared_preferences` | `^2.2.3` | Local key-value storage for caching command descriptions, onboarding state, dark mode, chat history |
 
 ### Dev Dependencies
 
@@ -661,20 +702,17 @@ flutter run
 | Default model path | `/data/local/tmp/llm/model.task` | `MainActivity.kt` |
 | Default API mode | `local` | `MainActivity.kt` |
 | Default API model | `gemini-2.5-flash` | `MainActivity.kt` |
-| LLM max tokens | 512 | `MainActivity.kt`, `TypiLikeAccessibilityService.kt` |
-| LLM output tokens | 128 | `MainActivity.kt`, `TypiLikeAccessibilityService.kt` |
+| Supported API models | `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`, `gemma-3n-e2b-it`, `gemma-3n-e4b-it`, `gemma-4-31b-it`, `gemma-4-26b-a4b-it` | `SettingsProvider` |
+| Default LLM max tokens | 512 (configurable) | `MainActivity.kt`, `TypiLikeAccessibilityService.kt` |
+| Default LLM output tokens | 128 (configurable) | `MainActivity.kt`, `TypiLikeAccessibilityService.kt` |
 | SharedPreferences name | `local_llm_prefs` | Both Kotlin files |
-| Web app theme color | `#0175C2` | `web/manifest.json` |
 
 ---
 
 ## Known Issues & TODOs
 
-- **Outdated widget test:** `test/widget_test.dart` references UI text (`'Offline LLM Demo'`, `'Init Model'`) that no longer exists. The test will fail.
+- **Outdated widget test:** `test/widget_test.dart` references UI text that no longer exists. The test will fail.
 - **Release signing:** `android/app/build.gradle.kts` uses debug signing for release builds (marked with `// TODO`).
-- **Single-file monolith:** All Dart code is in a single `lib/main.dart` (~2,250 lines). Consider splitting into separate files per screen/service.
 - **No error boundary:** No global error handling or crash reporting.
-- **Light theme only:** No dark mode support in Flutter UI (Android overlays do have dark theme styles).
 - **iOS/macOS/Linux/Windows:** Platform shells exist but have no native LLM or accessibility integration — the app's core features are Android-only.
 - **Application ID:** Still uses the default `com.example.local_grammer_llm` — should be changed before publishing.
-- **Static chat cache:** `ChatPage` messages persist across navigation via static fields but are lost on app restart.

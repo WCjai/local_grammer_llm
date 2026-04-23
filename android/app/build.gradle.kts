@@ -67,6 +67,7 @@ flutter {
 dependencies {
     implementation("com.google.mediapipe:tasks-genai:0.10.27")
     implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
-     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("androidx.core:core-ktx:1.13.1")
 }
