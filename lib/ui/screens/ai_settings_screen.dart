@@ -18,6 +18,33 @@ class AiSettingsScreen extends StatefulWidget {
 class _AiSettingsScreenState extends State<AiSettingsScreen> {
   final _channel = LlmChannelService();
   bool _downloadingModel = false;
+  bool _switchingMode = false;
+  bool _togglingVision = false;
+
+  Future<void> _changeProcessingMode(SettingsProvider settings, String mode) async {
+    if (_switchingMode) return;
+    if (settings.processingMode == mode) return;
+    setState(() => _switchingMode = true);
+    try {
+      await settings.setProcessingMode(mode);
+    } catch (e) {
+      _showNotice("$e");
+    } finally {
+      if (mounted) setState(() => _switchingMode = false);
+    }
+  }
+
+  Future<void> _toggleVisionSupport(SettingsProvider settings, bool v) async {
+    if (_togglingVision) return;
+    setState(() => _togglingVision = true);
+    try {
+      await settings.setModelSupportsVision(v);
+    } catch (e) {
+      _showNotice("Error: $e");
+    } finally {
+      if (mounted) setState(() => _togglingVision = false);
+    }
+  }
 
   void _showNotice(String message) {
     if (!mounted) return;
@@ -310,17 +337,17 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                       contentPadding: EdgeInsets.zero,
                       title: const Text("Image input support"),
                       subtitle: Text(
-                        "Enable only if your local model accepts image input.",
+                        _togglingVision
+                            ? "Rebuilding engine…"
+                            : "Enable only if your local model accepts image input.",
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: cs.onSurface.withValues(alpha: 0.5),
                         ),
                       ),
                       value: settings.modelSupportsVision,
-                      onChanged: (busy || !isLocal)
+                      onChanged: (busy || !isLocal || _togglingVision)
                           ? null
-                          : (v) => settings.setModelSupportsVision(v).catchError((e) {
-                                _showNotice("Error: $e");
-                              }),
+                          : (v) => _toggleVisionSupport(settings, v),
                     ),
                   ),
                 ),
@@ -506,11 +533,9 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                       label: "CPU",
                       description: "Optimized for lower resource usage.",
                       selected: settings.processingMode == "cpu",
-                      onTap: busy
+                      onTap: (busy || _switchingMode || settings.processingMode == "cpu")
                           ? null
-                          : () => settings
-                              .setProcessingMode("cpu")
-                              .catchError((e) { _showNotice("$e"); }),
+                          : () => _changeProcessingMode(settings, "cpu"),
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -522,11 +547,9 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                       label: "GPU",
                       description: "Designed for higher performance tasks.",
                       selected: settings.processingMode == "gpu",
-                      onTap: busy
+                      onTap: (busy || _switchingMode || settings.processingMode == "gpu")
                           ? null
-                          : () => settings
-                              .setProcessingMode("gpu")
-                              .catchError((e) { _showNotice("$e"); }),
+                          : () => _changeProcessingMode(settings, "gpu"),
                     ),
                   ),
                 ],
@@ -623,7 +646,10 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
     required bool selected,
     required VoidCallback? onTap,
   }) {
-    return GestureDetector(
+    final disabled = onTap == null && !selected;
+    return Opacity(
+      opacity: disabled ? 0.45 : 1.0,
+      child: GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 160),
@@ -661,6 +687,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 

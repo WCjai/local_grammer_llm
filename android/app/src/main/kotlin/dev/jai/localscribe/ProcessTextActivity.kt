@@ -52,6 +52,8 @@ class ProcessTextActivity : FlutterActivity() {
 
     private var llm: LocalLlm? = null
     private var currentModelPath: String? = null
+    private var currentVisionSupport: Boolean = false
+    private var currentProcessingMode: String? = null
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var methodChannel: MethodChannel? = null
     /** Holds the pending MethodChannel.Result for an in-progress captureScreenshot call. */
@@ -436,7 +438,9 @@ $text
             return engine.generate(prompt)
         }
         // Downscale to keep vision-token count under model patch limits.
-        val bmp = try { ImageUtils.decodeDownscaled(imagePath, 1024) } catch (_: Exception) { null }
+        // 768 keeps patches well under the 2520 ceiling and roughly halves prefill
+        // time vs. 1024, reducing the GPU-stall window that causes UI stutter.
+        val bmp = try { ImageUtils.decodeDownscaled(imagePath, 768) } catch (_: Exception) { null }
         if (bmp == null) {
             Log.w("LocalScribe", "[ProcessText] decodeDownscaled returned null for $imagePath, falling back to text-only")
             return engine.generate(prompt)
@@ -580,14 +584,21 @@ $text
     private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
         if (!File(path).exists()) { llm = null; currentModelPath = null; return null }
-        if (llm != null && currentModelPath == path) return llm
+        val visionSupport = getModelVisionSupport(path)
+        val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("processing_mode", "cpu") ?: "cpu"
+        if (llm != null &&
+            currentModelPath == path &&
+            currentVisionSupport == visionSupport &&
+            currentProcessingMode == processingMode
+        ) return llm
         return try {
             llm?.close()
-            val visionSupport = getModelVisionSupport(path)
-            val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString("processing_mode", "cpu") ?: "cpu"
+            Log.d("LocalScribe", "[ProcessText] Rebuilding engine: vision=$visionSupport mode=$processingMode")
             llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport, processingMode)
             currentModelPath = path
+            currentVisionSupport = visionSupport
+            currentProcessingMode = processingMode
             llm
         } catch (e: Exception) {
             Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)

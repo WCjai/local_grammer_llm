@@ -59,6 +59,18 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Dedicated single-thread dispatcher for LLM init/rebuild. Uses a background thread
+     * priority so GPU shader compilation, XNNPack cache decompression, and binder traffic
+     * don't starve the Flutter UI thread during the loading animation.
+     */
+    private val llmInitExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ls-llm-init").apply {
+            priority = Thread.MIN_PRIORITY
+            isDaemon = true
+        }
+    }
+    private val llmInitDispatcher = llmInitExecutor.asCoroutineDispatcher()
     private var llm: LocalLlm? = null
 
     // ---- prefs ----
@@ -85,6 +97,8 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private val DEFAULT_OUTPUT_TOKENS = 128
 
     private var currentModelPath: String? = null
+    private var currentVisionSupport: Boolean = false
+    private var currentProcessingMode: String? = null
 
     // Avoid re-trigger loops
     private var busy = false
@@ -133,9 +147,36 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private var previewDeferred: CompletableDeferred<Boolean>? = null
     private var contextDeferred: CompletableDeferred<ContextDecision>? = null
 
+    /**
+     * Listens for changes to vision/processing-mode prefs and proactively rebuilds the
+     * engine on the low-priority init thread. This hides the rebuild cost behind whatever
+     * the user is doing (instead of letting it land during the overlay loading animation).
+     */
+    private val prefsChangeListener =
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_MODEL_SUPPORTS_VISION || key == "processing_mode" || key == KEY_MODEL_PATH) {
+                scope.launch(llmInitDispatcher) {
+                    try { ensureLlmReady() } catch (_: Throwable) {}
+                }
+            }
+        }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .registerOnSharedPreferenceChangeListener(prefsChangeListener)
+        // Prewarm the LLM engine on the dedicated low-priority thread so the first
+        // generation doesn't pay the full GPU/CPU init cost while the overlay
+        // animation is running.
+        scope.launch(llmInitDispatcher) {
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                ensureLlmReady()
+            } catch (e: Throwable) {
+                Log.w("LocalScribe", "[Service] prewarm failed: ${e.message}")
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -322,9 +363,14 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         hideOverlay()
+        try {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .unregisterOnSharedPreferenceChangeListener(prefsChangeListener)
+        } catch (_: Exception) {}
         try { llm?.close() } catch (_: Exception) {}
         llm = null
         scope.cancel()
+        try { llmInitExecutor.shutdown() } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -519,7 +565,11 @@ $text
         return when (getApiMode()) {
             "online" -> generateOnline(prompt, jsonMode, imagePath)
             "best" -> tryOnlineThenLocal(prompt, jsonMode, imagePath)
-            else -> generateLocalWithImage(prompt, imagePath)
+            // Run local inference on the dedicated low-priority thread so the heavy
+            // CPU-side work (image decode, PNG encode, binder marshalling, token
+            // sampling) doesn't compete with the Flutter UI thread while the
+            // overlay loading animation is on screen.
+            else -> withContext(llmInitDispatcher) { generateLocalWithImage(prompt, imagePath) }
         }
     }
 
@@ -535,7 +585,10 @@ $text
         Log.d("LocalScribe", "[Service] imagePath=$imagePath supportsVision=${engine.supportsVision}")
         if (imagePath != null && engine.supportsVision) {
             // Downscale to cap vision-token count (LiteRT-LM patch limits) and reduce latency.
-            val bitmap = try { ImageUtils.decodeDownscaled(imagePath, 1024) } catch (_: Exception) { null }
+            // 768 keeps patches well under the 2520 ceiling (~1400 patches for portrait shots)
+            // which roughly halves prefill time vs. 1024 and reduces the GPU-stall window
+            // that was causing UI animation stutter.
+            val bitmap = try { ImageUtils.decodeDownscaled(imagePath, 768) } catch (_: Exception) { null }
             if (bitmap != null) {
                 try {
                     Log.d("LocalScribe", "[Service] Sending image (${bitmap.width}x${bitmap.height}) to LLM")
@@ -681,15 +734,23 @@ $text
             return null
         }
 
-        if (llm != null && currentModelPath == modelPath) return llm
+        val visionSupport = getModelVisionSupport(modelPath)
+        val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("processing_mode", "cpu") ?: "cpu"
+
+        if (llm != null &&
+            currentModelPath == modelPath &&
+            currentVisionSupport == visionSupport &&
+            currentProcessingMode == processingMode
+        ) return llm
 
         return try {
             llm?.close()
-            val visionSupport = getModelVisionSupport(modelPath)
-            val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString("processing_mode", "cpu") ?: "cpu"
+            Log.d("LocalScribe", "[Service] Rebuilding engine: vision=$visionSupport mode=$processingMode")
             llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens(), visionSupport, processingMode)
             currentModelPath = modelPath
+            currentVisionSupport = visionSupport
+            currentProcessingMode = processingMode
             llm
         } catch (e: Exception) {
             Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
