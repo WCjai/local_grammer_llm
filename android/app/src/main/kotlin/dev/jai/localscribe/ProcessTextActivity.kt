@@ -173,25 +173,33 @@ class ProcessTextActivity : FlutterActivity() {
                         val context = call.argument<String>("context") ?: ""
                         val imagePath = call.argument<String>("imagePath")
 
-                        val isScribe = command == "scribe"
                         ioScope.launch {
                             try {
-                                val prompt = if (isScribe) {
-                                    buildScribePrompt(text, context, imagePath != null)
-                                } else {
-                                    val customTask = getCustomTaskIfAny(command)
-                                    val task = customTask ?: mapCommandToTask(command, arg)
-                                    buildTaggedPrompt(task, text, context, imagePath != null)
-                                }
+                                val customTask = getCustomTaskIfAny(command)
+                                val isCustom = customTask != null
+                                val kind = PromptBuilder.classify(command, isCustom)
+                                // For built-in `rewrite` the arg is already baked into the task
+                                // by mapBuiltInTask; pass null so PromptBuilder doesn't also
+                                // append it as a "Style modifier" line and duplicate it.
+                                val argForBuilder = if (!isCustom && command == "rewrite") null else arg
+                                val task = customTask ?: PromptBuilder.mapBuiltInTask(command, arg)
+                                val built = PromptBuilder.build(
+                                    task = task,
+                                    text = text,
+                                    context = context,
+                                    arg = argForBuilder,
+                                    hasImage = imagePath != null,
+                                    kind = kind,
+                                )
 
                                 val raw = withTimeout(if (imagePath != null) 120_000L else 20_000L) {
-                                    generateAccordingToMode(prompt, jsonMode = !isScribe, imagePath = imagePath)
+                                    generateAccordingToMode(built.prompt, jsonMode = built.jsonMode, imagePath = imagePath)
                                 }
 
-                                val processed = if (isScribe) {
-                                    removeThinkOnly(raw).trim()
-                                } else {
+                                val processed = if (built.jsonMode) {
                                     postProcessOutput(raw)
+                                } else {
+                                    removeThinkOnly(raw).trim()
                                 }
 
                                 withContext(Dispatchers.Main) {
@@ -253,111 +261,18 @@ class ProcessTextActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        try {
-            llm?.close()
-            llm = null
-        } catch (_: Exception) {}
+        // Don't close — the engine is owned by [SharedLlm] for the whole
+        // app process and is probably still serving the accessibility
+        // service or the chat screen. Just drop our local reference.
+        llm = null
         super.onDestroy()
     }
 
     // ---- Prompt building ----
-
-    private fun buildTaggedPrompt(task: String, text: String, context: String?, hasImage: Boolean = false): String {
-        val ctx = context?.trim().orEmpty()
-
-        val contextSection = when {
-            ctx.isNotBlank() -> """
-[CONTEXT]
-$ctx
-[/CONTEXT]"""
-            else -> ""
-        }
-
-        val imageSection = if (hasImage) """
-[IMAGE_CONTEXT]
-A screenshot is attached. Use it as visual reference to understand the subject matter, identify key details, and improve the quality of the output. The image and the text below refer to the same topic.
-[/IMAGE_CONTEXT]""" else ""
-
-        val rules = buildString {
-            appendLine("Keep the same language as the input unless the task says otherwise.")
-            appendLine("Keep the SAME point of view and pronouns (do NOT change I/you/She/He/they).")
-            appendLine("Preserve the original meaning and intent exactly.")
-            appendLine("Do not add new facts or remove unique details.")
-            appendLine("Keep names, numbers, dates and places unchanged.")
-            appendLine("Do not mention the task, rules, or context in the output.")
-            if (hasImage && ctx.isNotBlank())
-                appendLine("The screenshot and the context text together form the background — use both to inform the task.")
-            else if (hasImage)
-                appendLine("Use insights from the attached screenshot to inform the task.")
-            else if (ctx.isNotBlank())
-                appendLine("Use the provided context to inform the task.")
-            append("Output only the final answer (no explanations, no quotes, no formatting).")
-        }.trimEnd()
-
-        return """
-You are a writing engine.
-
-OUTPUT FORMAT (mandatory):
-Return ONLY valid JSON exactly like:
-{"output":"..."}
-No other keys. No extra text. No markdown.
-If you cannot comply, return: {"output":""}
-
-[TASK]
-$task
-[/TASK]
-$contextSection
-$imageSection
-[RULES]
-$rules
-[/RULES]
-
-[TEXT]
-$text
-[/TEXT]
-""".trimIndent()
-    }
-
-    private fun buildScribePrompt(text: String, context: String?, hasImage: Boolean = false): String {
-        val ctx = context?.trim().orEmpty()
-        val hasCtx = ctx.isNotBlank()
-
-        return buildString {
-            append("Respond in the same language as the input. Provide only the final answer. No explanations.")
-            if (hasCtx && hasImage) {
-                append(" The following context and the attached screenshot both provide background — use them together: \"$ctx\".")
-            } else if (hasCtx) {
-                append(" Use this context: \"$ctx\".")
-            } else if (hasImage) {
-                append(" An attached screenshot provides visual context — use it to inform your response.")
-            }
-            append(" Input: \"$text\"")
-        }
-    }
-
-    private fun mapCommandToTask(cmd: String, arg: String?): String {
-        return when (cmd) {
-            "fix" -> "Correct grammar, spelling, and punctuation in the same language."
-            "rewrite" -> {
-                when (arg?.lowercase()) {
-                    "formal" -> "Rewrite the text in a formal and professional tone in the same language."
-                    "friendly" -> "Rewrite the text in a friendly tone in the same language."
-                    "short" -> "Rewrite the text shorter while preserving meaning in the same language."
-                    else -> "Rewrite the text clearly while preserving meaning in the same language."
-                }
-            }
-            "polite" -> "Rewrite the text in a polite and professional tone in the same language."
-            "casual" -> "Rewrite the text in a casual and friendly tone in the same language."
-            "summ" -> "Summarize the text in one or two sentences in the same language."
-            "expand" -> "Expand the text with more detail while keeping the same language."
-            "translate" -> "Translate the text into English."
-            "bullet" -> "Convert the text into clear bullet points in the same language."
-            "improve" -> "Improve writing clarity and quality while keeping meaning and language the same."
-            "rephrase" -> "Rephrase the text completely while keeping the same meaning and language."
-            "formal" -> "Rewrite the text in a formal, professional tone in the same language."
-            else -> "Rewrite the text clearly while preserving meaning in the same language."
-        }
-    }
+    // Prompt assembly lives in [PromptBuilder]. The only thing this class
+    // still owns is loading the user's own custom prompts from prefs so the
+    // dispatcher above can decide whether to treat the keyword as built-in
+    // or custom.
 
     private fun getCustomTaskIfAny(cmd: String): String? {
         val custom = getCustomPrompts()
@@ -437,10 +352,12 @@ $text
             Log.w("LocalScribe", "[ProcessText] Model does not support vision, ignoring image")
             return engine.generate(prompt)
         }
-        // Downscale to keep vision-token count under model patch limits.
-        // 768 keeps patches well under the 2520 ceiling and roughly halves prefill
-        // time vs. 1024, reducing the GPU-stall window that causes UI stutter.
-        val bmp = try { ImageUtils.decodeDownscaled(imagePath, 768) } catch (_: Exception) { null }
+        // Downscale aggressively to keep vision-token count low. LiteRT-LM
+        // Gemma3's 2520-patch ceiling is easy to hit with portrait screenshots
+        // at higher resolutions — 768 long-edge can push prefill over 3s on
+        // mid-range devices, stalling the UI thread. 512 cuts patches ~2x
+        // while remaining readable for typical text-extraction flows.
+        val bmp = try { ImageUtils.decodeDownscaled(imagePath, 512) } catch (_: Exception) { null }
         if (bmp == null) {
             Log.w("LocalScribe", "[ProcessText] decodeDownscaled returned null for $imagePath, falling back to text-only")
             return engine.generate(prompt)
@@ -583,27 +500,38 @@ $text
     @Synchronized
     private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
-        if (!File(path).exists()) { llm = null; currentModelPath = null; return null }
         val visionSupport = getModelVisionSupport(path)
         val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString("processing_mode", "cpu") ?: "cpu"
-        if (llm != null &&
-            currentModelPath == path &&
-            currentVisionSupport == visionSupport &&
-            currentProcessingMode == processingMode
-        ) return llm
-        return try {
-            llm?.close()
-            Log.d("LocalScribe", "[ProcessText] Rebuilding engine: vision=$visionSupport mode=$processingMode")
-            llm = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport, processingMode)
-            currentModelPath = path
-            currentVisionSupport = visionSupport
-            currentProcessingMode = processingMode
-            llm
-        } catch (e: Exception) {
-            Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
-            llm = null; currentModelPath = null; null
-        }
+
+        // Share a single process-wide engine with the accessibility service
+        // and (via invalidate hooks) the chat activity. Pre-holder, opening
+        // this popup after the service had warmed up spent ~13 s cold-initing
+        // a second copy of the same model in the same process.
+        // Read committed sampler params so the share-popup engine matches
+        // whatever the user applied in AI Settings. Without this the holder
+        // keyed on default SamplerParams() and never rebuilt on edits.
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val sampler = SamplerParams(
+            temperature = prefs.getFloat("sampler_temperature", 0.3f),
+            topK = prefs.getInt("sampler_top_k", 40),
+            topP = prefs.getFloat("sampler_top_p", 0.9f),
+        )
+        val engine = SharedLlm.acquire(
+            applicationContext,
+            SharedLlm.Key(
+                modelPath = path,
+                maxTokens = getMaxTokens(),
+                supportsVision = visionSupport,
+                processingMode = processingMode,
+                sampler = sampler,
+            ),
+        )
+        llm = engine
+        currentModelPath = if (engine != null) path else null
+        currentVisionSupport = visionSupport
+        currentProcessingMode = processingMode
+        return engine
     }
 
     private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean {

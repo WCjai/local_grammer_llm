@@ -569,6 +569,29 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
         const SizedBox(height: 16),
         Row(
           children: [
+            Expanded(
+              child: TextButton.icon(
+                onPressed: _reset,
+                icon: const Icon(Icons.arrow_back, size: 18),
+                label: const Text('Back'),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _copyResult,
+                icon: const Icon(Icons.copy, size: 18),
+                label: const Text('Copy'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  side: BorderSide(color: cs.outline),
+                ),
+              ),
+            ),
+            if (!_isReadOnly) const SizedBox(width: 8),
             if (!_isReadOnly)
               Expanded(
                 child: FilledButton.icon(
@@ -582,29 +605,6 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
                   ),
                 ),
               ),
-            if (!_isReadOnly) const SizedBox(width: 8),
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: _copyResult,
-                icon: const Icon(Icons.copy, size: 18),
-                label: const Text('Copy'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  side: BorderSide(color: cs.outline),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextButton.icon(
-                onPressed: _reset,
-                icon: const Icon(Icons.arrow_back, size: 18),
-                label: const Text('Back'),
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-              ),
-            ),
           ],
         ),
       ],

@@ -104,8 +104,17 @@ class CommandsProvider extends ChangeNotifier {
     if (genId != _genId) return "Custom prompt";
     if (prompt.trim().isEmpty) return "Custom prompt";
     try {
+      // One-shot exemplar keeps small local models from echoing the input
+      // verbatim or adding punctuation / quotes around the label.
       final text = await _channel.generate(
-        "Summarize this instruction in 3-6 words. No punctuation, no quotes. Instruction: $prompt",
+        'Summarize this instruction as a short UI label: 3-6 words, Title Case, '
+        'no punctuation, no quotes, no trailing period.\n'
+        'Example:\n'
+        'Instruction: "Rewrite the text to sound more professional and concise."\n'
+        'Label: Make It More Professional\n'
+        'Now do the same for:\n'
+        'Instruction: "$prompt"\n'
+        'Label:',
       );
       if (genId != _genId) return "Custom prompt";
       final cleaned = (text ?? "").trim();
@@ -128,9 +137,15 @@ You are summarizing custom prompts for a UI list.
 Return ONLY valid JSON in this exact schema:
 {"items":[{"keyword":"...","desc":"..."}]}
 Rules:
-- desc must be 3-6 words, no punctuation
+- desc must be 3-6 words, Title Case, no punctuation, no quotes
 - preserve keyword exactly as given
 - no extra text or markdown
+
+Example input:
+{"items":[{"keyword":"fix","prompt":"Fix grammar and typos in the text."}]}
+Example output:
+{"items":[{"keyword":"fix","desc":"Fix Grammar And Typos"}]}
+
 Input:
 ${jsonEncode({"items": payload})}
 """;

@@ -35,14 +35,21 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class MainActivity : FlutterActivity() {
 
     private val CHANNEL = "local_llm"
     private val PROGRESS_CHANNEL = "local_llm_progress"
+    private val GENERATION_CHANNEL = "local_llm_generation"
     private var llm: LocalLlm? = null
     private var initInProgress = false
+    // Serializes engine lifecycle + generation so cancel/close/rebuild can't
+    // race a live generateResponseAsync callback. Streaming still runs on the
+    // native thread; we only hold this while handing off to/from the engine.
+    private val generationMutex = Mutex()
     private val PREFS_NAME = "local_llm_prefs"
     private val KEY_MODEL_PATH = "model_path"
     private val KEY_SERVICE_ENABLED = "service_enabled"
@@ -54,17 +61,32 @@ class MainActivity : FlutterActivity() {
     private val KEY_API_MODEL = "api_model"
     private val KEY_MAX_TOKENS = "max_tokens"
     private val KEY_OUTPUT_TOKENS = "output_tokens"
+    private val KEY_TEMPERATURE = "sampler_temperature"
+    private val KEY_TOP_K = "sampler_top_k"
+    private val KEY_TOP_P = "sampler_top_p"
+    private val KEY_ADVANCED_MODE = "advanced_sampler_mode"
     private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.task"
     private val DEFAULT_API_MODE = "local"
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
     private val DEFAULT_MAX_TOKENS = 512
     private val DEFAULT_OUTPUT_TOKENS = 128
+    private val DEFAULT_TEMPERATURE = 0.3f
+    private val DEFAULT_TOP_K = 40
+    private val DEFAULT_TOP_P = 0.9f
     private var pendingPickResult: MethodChannel.Result? = null
     private val PICK_MODEL_REQUEST = 7010
     private val NOTIFICATION_PERMISSION_REQUEST = 7011
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var progressSink: EventChannel.EventSink? = null
+    // Token-stream sink for `generateStream` consumers. We write small maps
+    // {"token": String} / {"done": true} / {"error": String} so the Dart side
+    // can distinguish events without a separate channel per event type.
+    private var generationSink: EventChannel.EventSink? = null
     private var currentModelPath: String? = null
+    // Snapshot of the sampler params that the current engine was built with.
+    // When the user edits sliders we compare against this and rebuild only if
+    // they actually changed.
+    private var currentSampler: SamplerParams? = null
     // Download state delegated to ModelDownloadService
     private var pendingDownloadResult: MethodChannel.Result? = null
     private var downloadReceiver: BroadcastReceiver? = null
@@ -81,6 +103,21 @@ class MainActivity : FlutterActivity() {
 
                 override fun onCancel(arguments: Any?) {
                     progressSink = null
+                }
+            })
+
+        // Token stream for chat-style streaming generation. Emits maps:
+        //   {"token": "partial text"}  — incremental chunk
+        //   {"done": true}              — final chunk delivered, stream closed
+        //   {"error": "message"}       — generation failed
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, GENERATION_CHANNEL)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    generationSink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    generationSink = null
                 }
             })
 
@@ -101,6 +138,10 @@ class MainActivity : FlutterActivity() {
                     ModelDownloadService.BROADCAST_DONE -> {
                         val path = intent.getStringExtra(ModelDownloadService.EXTRA_PATH) ?: ""
                         llm?.close(); llm = null
+                        // The model file on disk was just replaced; any
+                        // engine cached in the process-wide holder now
+                        // references the OLD file, so blow it away.
+                        SharedLlm.invalidate()
                         emitProgress(1.0, true)
                         runOnUiThread {
                             pendingDownloadResult?.success(path)
@@ -356,6 +397,10 @@ class MainActivity : FlutterActivity() {
                             saveModelPath(modelPath)
                             llm?.close()
                             llm = null
+                            // Model switched — the holder's cached engine
+                            // was built against a different path. Force a
+                            // rebuild on the next acquire from any surface.
+                            SharedLlm.invalidate()
                             result.success(true)
                         } catch (e: Exception) {
                             result.error("SET_PATH_FAIL", e.message, null)
@@ -480,16 +525,15 @@ class MainActivity : FlutterActivity() {
                         val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
                         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .edit().putBoolean(KEY_MODEL_SUPPORTS_VISION, enabled).apply()
-                        // Tear down so ensureLlmReady() rebuilds with the new vision flag.
-                        llm?.close()
-                        llm = null
-                        currentModelPath = null
 
-                        // Eagerly rebuild so the change takes effect immediately instead
-                        // of waiting until the next inference call. This also surfaces any
-                        // init failure (e.g. vision backend not supported by the model file)
-                        // at toggle time rather than mid-inference.
+                        // Tear down + rebuild on IO so close()'s native teardown
+                        // (which may block briefly if a generation is in flight)
+                        // doesn't stall the main thread while the user is tapping
+                        // through settings.
                         ioScope.launch {
+                            try { llm?.close() } catch (_: Exception) {}
+                            llm = null
+                            currentModelPath = null
                             try {
                                 ensureLlmReady()
                                 Log.i("LocalScribe", "Vision toggle applied: supportsVision=$enabled, engine rebuilt")
@@ -505,6 +549,11 @@ class MainActivity : FlutterActivity() {
                             try {
                                 llm?.close()
                                 llm = null
+                                // Model file is about to be removed; drop
+                                // the holder's reference too so no other
+                                // surface tries to generate from a deleted
+                                // file.
+                                SharedLlm.invalidate()
                                 val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                                 val path = prefs.getString(KEY_MODEL_PATH, null)
                                 if (!path.isNullOrBlank()) {
@@ -533,15 +582,15 @@ class MainActivity : FlutterActivity() {
                         val requested = call.argument<String>("mode") ?: "cpu"
                         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .edit().putString("processing_mode", requested).apply()
-                        // Tear down so the next ensureLlmReady() rebuilds with the new backend.
-                        llm?.close()
-                        llm = null
-                        currentModelPath = null
 
-                        // Eagerly try to rebuild — this surfaces GPU init failures here
-                        // (where we can fall back to CPU and tell the UI) instead of
-                        // crashing later mid-inference.
+                        // Tear down + rebuild on IO. close() can block on native
+                        // teardown (esp. if a generation is still draining), and
+                        // we don't want to freeze the processing-mode toggle UI
+                        // while that happens.
                         ioScope.launch {
+                            try { llm?.close() } catch (_: Exception) {}
+                            llm = null
+                            currentModelPath = null
                             val actual = try {
                                 val engine = ensureLlmReady()
                                 engine?.activeBackend ?: requested
@@ -575,6 +624,61 @@ class MainActivity : FlutterActivity() {
                             arrayOf("android.permission.POST_NOTIFICATIONS"),
                             NOTIFICATION_PERMISSION_REQUEST
                         )
+                    }
+
+                    "generateStream" -> {
+                        val prompt = call.argument<String>("prompt") ?: ""
+                        // Streaming is local-only — online Gemini calls use the
+                        // blocking "generate" method. If mode is "online"/"best"
+                        // the Dart layer is responsible for falling back to that.
+                        result.success(true)
+                        ioScope.launch {
+                            startLocalStream(prompt)
+                        }
+                    }
+
+                    "cancelGenerate" -> {
+                        val cancelled = try { llm?.cancel() ?: false } catch (_: Exception) { false }
+                        result.success(cancelled)
+                    }
+
+                    "getTemperature" -> result.success(getTemperature().toDouble())
+                    "setTemperature" -> {
+                        val v = (call.argument<Number>("value"))?.toFloat()
+                        if (v == null) { result.error("BAD_ARGS", "value is required", null); return@setMethodCallHandler }
+                        saveTemperature(v)
+                        invalidateEngineIfSamplerChanged()
+                        // Also wipe the process-wide holder so the accessibility
+                        // service + ProcessText popup rebuild with the new sampler
+                        // on their next acquire. Without this they keep the old
+                        // warm engine keyed on the previous SamplerParams.
+                        SharedLlm.invalidate()
+                        result.success(true)
+                    }
+                    "getTopK" -> result.success(getTopK())
+                    "setTopK" -> {
+                        val v = call.argument<Int>("value")
+                        if (v == null) { result.error("BAD_ARGS", "value is required", null); return@setMethodCallHandler }
+                        saveTopK(v)
+                        invalidateEngineIfSamplerChanged()
+                        SharedLlm.invalidate()
+                        result.success(true)
+                    }
+                    "getTopP" -> result.success(getTopP().toDouble())
+                    "setTopP" -> {
+                        val v = (call.argument<Number>("value"))?.toFloat()
+                        if (v == null) { result.error("BAD_ARGS", "value is required", null); return@setMethodCallHandler }
+                        saveTopP(v)
+                        invalidateEngineIfSamplerChanged()
+                        SharedLlm.invalidate()
+                        result.success(true)
+                    }
+                    "getAdvancedMode" -> result.success(getAdvancedMode())
+                    "setAdvancedMode" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .edit().putBoolean(KEY_ADVANCED_MODE, enabled).apply()
+                        result.success(true)
                     }
 
                     else -> result.notImplemented()
@@ -852,10 +956,18 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun generateLocal(prompt: String): String {
-        val engine = ensureLlmReady()
-            ?: throw IllegalStateException("Model not initialized. Pick a model first.")
-        ensurePromptFits(engine, prompt)
-        return engine.generate(prompt)
+        // Hold the generation mutex across the entire call so concurrent
+        // generate/cancel/close requests can't race against a live native
+        // inference. runBlocking is safe here because generateLocal itself
+        // already runs off the main thread (ioScope / Dispatchers.Default).
+        return kotlinx.coroutines.runBlocking {
+            generationMutex.withLock {
+                val engine = ensureLlmReady()
+                    ?: throw IllegalStateException("Model not initialized. Pick a model first.")
+                ensurePromptFits(engine, prompt)
+                engine.generate(prompt)
+            }
+        }
     }
 
     private fun ensurePromptFits(engine: LocalLlm, prompt: String) {
@@ -876,15 +988,28 @@ class MainActivity : FlutterActivity() {
 
     private fun ensureLlmReady(): LocalLlm? {
         val path = getSavedModelPath()
-        if (llm != null && currentModelPath == path) return llm
+        val sampler = SamplerParams(
+            temperature = getTemperature(),
+            topK = getTopK(),
+            topP = getTopP(),
+        )
+        if (llm != null && currentModelPath == path && currentSampler == sampler) return llm
         return try {
             if (!File(path).exists()) return null
             llm?.close()
             val visionSupport = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .getBoolean("model_supports_vision", false)
-            val engine = LocalLlmFactory.create(applicationContext, path, getMaxTokens(), visionSupport, getProcessingMode())
+            val engine = LocalLlmFactory.create(
+                applicationContext,
+                path,
+                getMaxTokens(),
+                visionSupport,
+                getProcessingMode(),
+                sampler,
+            )
             llm = engine
             currentModelPath = path
+            currentSampler = sampler
             // If GPU was requested but the factory fell back to CPU, persist the
             // actually-used backend so the settings UI reflects reality on next read.
             val savedMode = getProcessingMode()
@@ -897,7 +1022,120 @@ class MainActivity : FlutterActivity() {
             android.util.Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
             llm = null
             currentModelPath = null
+            currentSampler = null
             null
+        }
+    }
+
+    /**
+     * Invoked from sampler setters. If the saved params differ from what the
+     * current engine was built with, tear it down so the next generate call
+     * rebuilds with the new values. We don't rebuild eagerly — init is
+     * expensive and the user may be dragging a slider. Close is dispatched
+     * to ioScope so the slider callback stays responsive even if the native
+     * engine is still finishing a pending generation.
+     */
+    private fun invalidateEngineIfSamplerChanged() {
+        val want = SamplerParams(getTemperature(), getTopK(), getTopP())
+        if (currentSampler != null && currentSampler != want) {
+            val stale = llm
+            llm = null
+            currentModelPath = null
+            currentSampler = null
+            if (stale != null) {
+                ioScope.launch {
+                    try { stale.close() } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    private fun getTemperature(): Float {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getFloat(KEY_TEMPERATURE, DEFAULT_TEMPERATURE)
+    }
+    private fun saveTemperature(v: Float) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_TEMPERATURE, v.coerceIn(0.0f, 2.0f)).apply()
+    }
+    private fun getTopK(): Int {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_TOP_K, DEFAULT_TOP_K)
+    }
+    private fun saveTopK(v: Int) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putInt(KEY_TOP_K, v.coerceIn(1, 100)).apply()
+    }
+    private fun getTopP(): Float {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getFloat(KEY_TOP_P, DEFAULT_TOP_P)
+    }
+    private fun saveTopP(v: Float) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_TOP_P, v.coerceIn(0.0f, 1.0f)).apply()
+    }
+    private fun getAdvancedMode(): Boolean {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ADVANCED_MODE, false)
+    }
+
+    /**
+     * Kicks off a streaming generation on the local engine. Token / done /
+     * error frames are forwarded to [generationSink] on the UI thread so the
+     * Flutter EventChannel delivers them in order.
+     *
+     * We hold [generationMutex] across the whole call so cancel/close can't
+     * race the native callback path. The native runtime itself handles
+     * threading — we just marshal events back to Dart.
+     */
+    private suspend fun startLocalStream(prompt: String) {
+        generationMutex.withLock {
+            val engine = ensureLlmReady()
+            if (engine == null) {
+                emitGenerationError("Model not initialized. Pick a model first.")
+                return
+            }
+            try {
+                ensurePromptFits(engine, prompt)
+            } catch (e: Exception) {
+                emitGenerationError(e.message ?: "Prompt too long")
+                return
+            }
+            val completion = kotlinx.coroutines.CompletableDeferred<Unit>()
+            try {
+                engine.generateStream(
+                    prompt,
+                    onToken = { partial ->
+                        runOnUiThread {
+                            generationSink?.success(mapOf("token" to partial))
+                        }
+                    },
+                    onDone = {
+                        runOnUiThread {
+                            generationSink?.success(mapOf("done" to true))
+                        }
+                        if (!completion.isCompleted) completion.complete(Unit)
+                    },
+                    onError = { t ->
+                        runOnUiThread {
+                            generationSink?.success(mapOf("error" to (t.message ?: "Generation failed")))
+                        }
+                        if (!completion.isCompleted) completion.complete(Unit)
+                    },
+                )
+            } catch (t: Throwable) {
+                emitGenerationError(t.message ?: "Generation failed")
+                return
+            }
+            // Wait for either onDone or onError so we keep holding the mutex
+            // until the native side actually stops.
+            completion.await()
+        }
+    }
+
+    private fun emitGenerationError(msg: String) {
+        runOnUiThread {
+            generationSink?.success(mapOf("error" to msg))
         }
     }
 

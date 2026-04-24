@@ -278,6 +278,33 @@ Output JSON only, format:
     }
   }
 
+  /// Aborts the in-flight generation. Bumps [_generationId] so the still-running
+  /// `_generate` future gets ignored on completion, tells native to stop so we
+  /// don't burn CPU, and swaps the placeholder bubble for a "Cancelled" note.
+  Future<void> _cancelGenerate() async {
+    if (!_busy) return;
+    _generationId++;
+    try {
+      await _channel.cancelGenerate();
+    } catch (_) {
+      // best effort — if native has nothing in flight this is a no-op.
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      if (_messages.isNotEmpty &&
+          _messages.last.role == ChatRole.assistant &&
+          _messages.last.text == 'Generating...') {
+        _messages.removeLast();
+        _messages.add(const ChatMessage(
+          role: ChatRole.assistant,
+          text: 'Cancelled.',
+        ));
+      }
+    });
+    _saveHistory().ignore();
+  }
+
   // ── Persistence ────────────────────────────────────────────────────────────
 
   Map<String, dynamic> _msgToJson(ChatMessage msg) => {
@@ -535,21 +562,16 @@ Output JSON only, format:
             ),
             const SizedBox(width: 8),
             FilledButton(
-              onPressed: _busy ? null : _generate,
+              onPressed: _busy ? _cancelGenerate : _generate,
               style: FilledButton.styleFrom(
                 minimumSize: const Size(48, 48),
                 padding: EdgeInsets.zero,
                 shape: const CircleBorder(),
+                backgroundColor:
+                    _busy ? theme.colorScheme.error : null,
               ),
               child: _busy
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
+                  ? const Icon(Icons.stop_rounded, color: Colors.white)
                   : const Icon(Icons.arrow_upward_rounded),
             ),
           ],

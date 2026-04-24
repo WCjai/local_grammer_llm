@@ -21,6 +21,18 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
   bool _switchingMode = false;
   bool _togglingVision = false;
 
+  // Pending sampler edits. Writing to the MethodChannel on every slider
+  // frame stalls the drag on mid-range devices, so we hold edits locally
+  // and commit them through an explicit Apply button. Native reads the
+  // sampler at generate time (see MainActivity.invalidateEngineIfSamplerChanged),
+  // so committed values automatically apply to the next LLM call.
+  double? _pendingCreativity;
+  double? _pendingTemp;
+  int? _pendingTopK;
+  double? _pendingTopP;
+  bool _advancedExpanded = false;
+  bool _applyingSampler = false;
+
   Future<void> _changeProcessingMode(SettingsProvider settings, String mode) async {
     if (_switchingMode) return;
     if (settings.processingMode == mode) return;
@@ -275,83 +287,12 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
               // ── LOCAL MODELS ─────────────────────────────────────────
               //_sectionLabel("LOCAL MODELS", theme),
               //const SizedBox(height: 8),
+              // The creativity sliders + image-input toggle used to sit as
+              // separate cards beneath this one. They are now rendered inside
+              // the local-model card so all Gemma-specific controls live in
+              // a single section.
               _localModelCard(theme, cs, model, settings, busy, isLocal),
               const SizedBox(height: 16),
-
-              // ── Token limits (only when local is active) ─────────────
-              // AnimatedOpacity(
-              //   opacity: isLocal ? 1.0 : 0.4,
-              //   duration: const Duration(milliseconds: 200),
-              //   child: IgnorePointer(
-              //     ignoring: !isLocal,
-              //     child: _settingsCard(
-              //       theme: theme,
-              //       icon: Icons.tune,
-              //       title: "Token Limits",
-              //       enabled: isLocal,
-              //       child: Column(
-              //         children: [
-              //           _tokenSlider(
-              //             label: "Max Tokens",
-              //             value: settings.maxTokens,
-              //             min: 256,
-              //             max: 2048,
-              //             divisions: 14,
-              //             enabled: !busy && isLocal,
-              //             onChanged: (v) => settings.setMaxTokens(v),
-              //             theme: theme,
-              //           ),
-              //           const SizedBox(height: 4),
-              //           _tokenSlider(
-              //             label: "Output Tokens",
-              //             value: settings.outputTokens,
-              //             min: 64,
-              //             max: (settings.maxTokens - 64).clamp(64, 512).toDouble(),
-              //             divisions: ((settings.maxTokens - 64).clamp(64, 512) - 64) ~/ 32,
-              //             enabled: !busy && isLocal,
-              //             onChanged: (v) => settings.setOutputTokens(v),
-              //             theme: theme,
-              //           ),
-              //         ],
-              //       ),
-              //     ),
-              //   ),
-              // ),
-              // const SizedBox(height: 16),
-
-              // ── Other local options ─────────────────────────────────
-              AnimatedOpacity(
-                opacity: isLocal ? 1.0 : 0.4,
-                duration: const Duration(milliseconds: 200),
-                child: IgnorePointer(
-                  ignoring: !isLocal,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: theme.dividerColor.withValues(alpha: 0.4)),
-                    ),
-                    child: SwitchListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text("Image input support"),
-                      subtitle: Text(
-                        _togglingVision
-                            ? "Rebuilding engine…"
-                            : "Enable only if your local model accepts image input.",
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: cs.onSurface.withValues(alpha: 0.5),
-                        ),
-                      ),
-                      value: settings.modelSupportsVision,
-                      onChanged: (busy || !isLocal || _togglingVision)
-                          ? null
-                          : (v) => _toggleVisionSupport(settings, v),
-                    ),
-                  ),
-                ),
-              ),
             ],
           ),
         ),
@@ -582,6 +523,41 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                   ],
                 ),
               ),
+              const SizedBox(height: 20),
+
+              // ── Image input support (moved inside the local-model card so
+              //     every Gemma-specific control lives in one section) ──
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                decoration: BoxDecoration(
+                  color: cs.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border:
+                      Border.all(color: cs.outline.withValues(alpha: 0.3)),
+                ),
+                child: SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text("Image input support"),
+                  subtitle: Text(
+                    _togglingVision
+                        ? "Rebuilding engine…"
+                        : "Enable only if your local model accepts image input.",
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.onSurface.withValues(alpha: 0.5),
+                    ),
+                  ),
+                  value: settings.modelSupportsVision,
+                  onChanged: (busy || !isLocal || _togglingVision)
+                      ? null
+                      : (v) => _toggleVisionSupport(settings, v),
+                ),
+              ),
+              const SizedBox(height: 14),
+
+              // ── Creativity + advanced sampler (also moved inside) ──
+              _creativityCard(theme, cs, settings, !busy && isLocal),
               const SizedBox(height: 20),
 
               // ── Bottom actions: Change + Delete ─────────────────
@@ -815,6 +791,327 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
             max: max,
             divisions: divisions > 0 ? divisions : 1,
             onChanged: enabled ? (v) => onChanged(v.round()) : null,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Card that hosts the Creativity slider plus a collapsible advanced
+  /// panel (temperature / top-K / top-P). Edits are buffered in local
+  /// `_pending*` fields so slider drags are silky on low-end devices —
+  /// the MethodChannel writes (which can rebuild the native engine) only
+  /// happen when the user taps **Apply**. Native re-reads sampler params
+  /// on every generate, so committed values always hit the next LLM call.
+  Widget _creativityCard(
+    ThemeData theme,
+    ColorScheme cs,
+    SettingsProvider settings,
+    bool enabled,
+  ) {
+    final creativity = _pendingCreativity ?? settings.creativity;
+    final temp = _pendingTemp ?? settings.temperature;
+    final topK = _pendingTopK ?? settings.topK;
+    final topP = _pendingTopP ?? settings.topP;
+
+    final dirty = _pendingCreativity != null ||
+        _pendingTemp != null ||
+        _pendingTopK != null ||
+        _pendingTopP != null;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: theme.dividerColor.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.auto_awesome_outlined, size: 18, color: cs.primary),
+              const SizedBox(width: 8),
+              Text(
+                "Creativity",
+                style: theme.textTheme.titleSmall
+                    ?.copyWith(fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: cs.primaryContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _creativityLabel(creativity),
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: cs.onPrimaryContainer,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            "Lower = strict / deterministic. Higher = exploratory.",
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: cs.onSurface.withValues(alpha: 0.6),
+            ),
+          ),
+          SliderTheme(
+            data: SliderThemeData(
+              trackHeight: 4,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+            ),
+            child: Slider(
+              value: creativity.clamp(0.0, 1.0),
+              onChanged: enabled
+                  ? (v) => setState(() => _pendingCreativity = v)
+                  : null,
+            ),
+          ),
+
+          // ── Advanced sampler (collapsible) ──────────────────────────
+          Theme(
+            // Strip the default ExpansionTile divider.
+            data: theme.copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              initiallyExpanded: _advancedExpanded || settings.advancedMode,
+              onExpansionChanged: (v) {
+                setState(() => _advancedExpanded = v);
+                // Remember the preference across screen visits. Fire-and-forget;
+                // a failure here shouldn't block the UI.
+                settings.setAdvancedMode(v);
+              },
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: const EdgeInsets.only(top: 4, bottom: 8),
+              dense: true,
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              title: Text(
+                "Advanced sampler",
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                "Tune temperature / top-K / top-P directly.",
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: cs.onSurface.withValues(alpha: 0.55),
+                ),
+              ),
+              children: [
+                _advSlider(
+                  theme: theme,
+                  label: "Temperature",
+                  value: temp,
+                  min: 0.0,
+                  max: 2.0,
+                  divisions: 40,
+                  display: temp.toStringAsFixed(2),
+                  enabled: enabled,
+                  onChanged: (v) => setState(() => _pendingTemp = v),
+                ),
+                const SizedBox(height: 8),
+                _advSlider(
+                  theme: theme,
+                  label: "Top-K",
+                  value: topK.toDouble(),
+                  min: 1,
+                  max: 100,
+                  divisions: 99,
+                  display: "$topK",
+                  enabled: enabled,
+                  onChanged: (v) =>
+                      setState(() => _pendingTopK = v.round()),
+                ),
+                const SizedBox(height: 8),
+                _advSlider(
+                  theme: theme,
+                  label: "Top-P",
+                  value: topP,
+                  min: 0.0,
+                  max: 1.0,
+                  divisions: 20,
+                  display: topP.toStringAsFixed(2),
+                  enabled: enabled,
+                  onChanged: (v) => setState(() => _pendingTopP = v),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Apply / Reset actions ───────────────────────────────────
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              // Reset-to-model-defaults lives on the leading edge as an
+              // icon-only button. Model defaults match `SamplerParams()`
+              // on the Kotlin side: temperature 0.3, top-K 40, top-P 0.9.
+              IconButton(
+                onPressed: (enabled && !_applyingSampler)
+                    ? () => _resetSamplerToDefaults(settings)
+                    : null,
+                icon: const Icon(Icons.restart_alt),
+                tooltip: "Reset to model defaults",
+                visualDensity: VisualDensity.compact,
+              ),
+              Expanded(
+                child: Text(
+                  dirty
+                      ? "Unsaved changes — tap Apply to use on next request."
+                      : "Changes apply to the next LLM request.",
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: dirty
+                        ? cs.tertiary
+                        : cs.onSurface.withValues(alpha: 0.55),
+                    fontWeight: dirty ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              FilledButton.icon(
+                onPressed: (enabled && dirty && !_applyingSampler)
+                    ? () => _applySampler(settings)
+                    : null,
+                icon: _applyingSampler
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.check, size: 16),
+                label: Text(_applyingSampler ? "Applying…" : "Apply"),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Word-label mapping for the Creativity slider. Buckets escalate through
+  /// "Strict" → "Precise" → "Balanced" → "Playful" → "Imaginative" →
+  /// "Extraordinary" at the top of the slider.
+  String _creativityLabel(double c) {
+    if (c < 0.15) return "Strict";
+    if (c < 0.35) return "Precise";
+    if (c < 0.55) return "Balanced";
+    if (c < 0.75) return "Playful";
+    if (c < 0.92) return "Imaginative";
+    return "Extraordinary";
+  }
+
+  /// Reset sampler knobs back to the model's default values. Defaults mirror
+  /// the Kotlin-side `SamplerParams()` (temperature 0.3, top-K 40, top-P 0.9).
+  /// Applies immediately and clears any pending edits so the UI reflects the
+  /// defaults right away.
+  Future<void> _resetSamplerToDefaults(SettingsProvider settings) async {
+    if (_applyingSampler) return;
+    setState(() => _applyingSampler = true);
+    try {
+      await settings.setTemperature(0.3);
+      await settings.setTopK(40);
+      await settings.setTopP(0.9);
+      if (!mounted) return;
+      setState(() {
+        _pendingCreativity = null;
+        _pendingTemp = null;
+        _pendingTopK = null;
+        _pendingTopP = null;
+      });
+      _showNotice("Sampler reset to model defaults ✓");
+    } catch (e) {
+      _showNotice("Error resetting sampler: $e");
+    } finally {
+      if (mounted) setState(() => _applyingSampler = false);
+    }
+  }
+
+  Future<void> _applySampler(SettingsProvider settings) async {
+    if (_applyingSampler) return;
+    setState(() => _applyingSampler = true);
+    try {
+      // Commit creativity first (it folds into temperature), then any
+      // explicit temperature override so the user's advanced edit wins.
+      if (_pendingCreativity != null) {
+        await settings.setCreativity(_pendingCreativity!);
+      }
+      if (_pendingTemp != null) {
+        await settings.setTemperature(_pendingTemp!);
+      }
+      if (_pendingTopK != null) {
+        await settings.setTopK(_pendingTopK!);
+      }
+      if (_pendingTopP != null) {
+        await settings.setTopP(_pendingTopP!);
+      }
+      if (!mounted) return;
+      setState(() {
+        _pendingCreativity = null;
+        _pendingTemp = null;
+        _pendingTopK = null;
+        _pendingTopP = null;
+      });
+      _showNotice("Sampler updated ✓");
+    } catch (e) {
+      _showNotice("Error applying sampler: $e");
+    } finally {
+      if (mounted) setState(() => _applyingSampler = false);
+    }
+  }
+
+  Widget _advSlider({
+    required ThemeData theme,
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String display,
+    required bool enabled,
+    required ValueChanged<double> onChanged,
+  }) {
+    final cs = theme.colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label, style: theme.textTheme.bodySmall),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: cs.primaryContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                display,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: cs.onPrimaryContainer,
+                ),
+              ),
+            ),
+          ],
+        ),
+        SliderTheme(
+          data: SliderThemeData(
+            trackHeight: 4,
+            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+            overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+          ),
+          child: Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions > 0 ? divisions : 1,
+            onChanged: enabled ? onChanged : null,
           ),
         ),
       ],

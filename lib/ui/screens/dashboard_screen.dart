@@ -10,7 +10,6 @@ import 'package:local_grammer_llm/ui/screens/chat_screen.dart';
 import 'package:local_grammer_llm/ui/screens/manage_prompts_screen.dart';
 import 'package:local_grammer_llm/ui/screens/demo_screen.dart';
 import 'package:local_grammer_llm/ui/widgets/no_glow_scroll.dart';
-import 'package:local_grammer_llm/ui/widgets/beta_tag.dart';
 import 'package:local_grammer_llm/ui/widgets/command_item.dart';
 import 'package:local_grammer_llm/ui/widgets/command_row.dart';
 import 'package:local_grammer_llm/ui/widgets/app_snackbar.dart';
@@ -185,18 +184,34 @@ class _DashboardScreenState extends State<DashboardScreen>
           ),
         ),
         child: SwitchListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          controlAffinity: ListTileControlAffinity.trailing,
           title: Text(
             service.serviceGranted
                 ? (service.serviceEnabled ? "Service Active" : "Enable Service")
                 : "Service Disabled",
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-          subtitle: Text(
-            service.serviceGranted
-                ? (service.serviceEnabled
-                    ? "Scribe is ready to help"
-                    : "Tap to activate Scribe assistant")
-                : "Android Accessibility permission required",
-            style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6)),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              service.serviceGranted
+                  ? (service.serviceEnabled
+                      ? "Scribe is ready to help"
+                      : "Tap to activate Scribe assistant")
+                  : "Android Accessibility permission required",
+              style: TextStyle(
+                fontSize: 14,
+                color: Theme.of(context)
+                    .colorScheme
+                    .onSurface
+                    .withValues(alpha: 0.7),
+              ),
+            ),
           ),
           value: service.serviceEnabled,
           onChanged: busy
@@ -212,34 +227,49 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   Widget _buildActionButtons(bool busy, ServiceProvider service, Color blue,
       Color green, Color yellow, CommandsProvider commands) {
+    // Larger hit targets that fill the empty horizontal space: the top row
+    // of primary buttons is 88 dp tall with big icons + labels, and the
+    // tertiary "How to use?" button matches at 64 dp so it reads as a
+    // proper dashboard tile instead of a skinny pill.
+    const double primaryHeight = 88;
+    const double secondaryHeight = 64;
+
     return Column(
       children: [
         Row(
           children: [
             Expanded(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: blue,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: busy
-                    ? null
-                    : () async {
-                        await Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const ChatScreen()),
-                        );
-                        commands.load();
-                      },
-                child: const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
+              child: SizedBox(
+                height: primaryHeight,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: blue,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
+                    textStyle: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  onPressed: busy
+                      ? null
+                      : () async {
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => const ChatScreen()),
+                          );
+                          commands.load();
+                        },
+                  child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.auto_awesome),
-                      SizedBox(width: 8),
-                      Text("Prompt Generator"),
-                      SizedBox(width: 8),
-                      BetaTag(),
+                      const Icon(Icons.auto_awesome, size: 28),
+                      const SizedBox(height: 6),
+                      const FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text("Prompt Generator"),
+                      ),
                     ],
                   ),
                 ),
@@ -247,28 +277,36 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: green,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: busy
-                    ? null
-                    : () async {
-                        await Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => const ManagePromptsScreen()),
-                        );
-                        commands.load();
-                      },
-                child: const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
+              child: SizedBox(
+                height: primaryHeight,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: green,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
+                    textStyle: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  onPressed: busy
+                      ? null
+                      : () async {
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => const ManagePromptsScreen()),
+                          );
+                          commands.load();
+                        },
+                  child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.tune),
-                      SizedBox(width: 8),
-                      Text("Manage Prompts"),
+                    children: const [
+                      Icon(Icons.tune, size: 28),
+                      SizedBox(height: 6),
+                      FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text("Manage Prompts")),
                     ],
                   ),
                 ),
@@ -279,12 +317,19 @@ class _DashboardScreenState extends State<DashboardScreen>
         const SizedBox(height: 12),
         SizedBox(
           width: double.infinity,
-          child: ElevatedButton(
+          height: secondaryHeight,
+          child: ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
-              backgroundColor:
-                  service.serviceEnabled ? yellow : Theme.of(context).colorScheme.outline,
-              foregroundColor:
-                  service.serviceEnabled ? Colors.black : Theme.of(context).colorScheme.onSurface,
+              backgroundColor: service.serviceEnabled
+                  ? yellow
+                  : Theme.of(context).colorScheme.outline,
+              foregroundColor: service.serviceEnabled
+                  ? Colors.black
+                  : Theme.of(context).colorScheme.onSurface,
+              textStyle:
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
             ),
             onPressed: busy
                 ? null
@@ -297,7 +342,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                       MaterialPageRoute(builder: (_) => const DemoScreen()),
                     );
                   },
-            child: const Text("How to use?"),
+            icon: const Icon(Icons.play_circle_outline, size: 24),
+            label: const Text("How to use?"),
           ),
         ),
       ],

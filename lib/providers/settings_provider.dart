@@ -33,6 +33,14 @@ class SettingsProvider extends ChangeNotifier {
   int _maxTokens = 512;
   int _outputTokens = 128;
 
+  // Sampler knobs. Defaults tuned for grammar / correction workloads; the
+  // Creativity slider in AI Settings remaps [0..1] onto temperature [0.1..1.2]
+  // so most users never touch the advanced fields directly.
+  double _temperature = 0.3;
+  int _topK = 40;
+  double _topP = 0.9;
+  bool _advancedMode = false;
+
   String get apiMode => _apiMode;
   String get apiModel => _apiModel;
   bool get apiValidating => _apiValidating;
@@ -45,6 +53,18 @@ class SettingsProvider extends ChangeNotifier {
   String get processingMode => _processingMode;
   int get maxTokens => _maxTokens;
   int get outputTokens => _outputTokens;
+  double get temperature => _temperature;
+  int get topK => _topK;
+  double get topP => _topP;
+  bool get advancedMode => _advancedMode;
+
+  /// Creativity slider value in [0.0, 1.0]. Derived from [temperature] using
+  /// the inverse of the mapping in [setCreativity]. Zero = deterministic,
+  /// one = exploratory.
+  double get creativity {
+    final t = _temperature.clamp(0.1, 1.2);
+    return ((t - 0.1) / 1.1).clamp(0.0, 1.0);
+  }
 
   Future<void> refreshAll() async {
     await Future.wait([
@@ -54,6 +74,7 @@ class SettingsProvider extends ChangeNotifier {
       _refreshTokens(),
       _refreshVision(),
       _refreshProcessingMode(),
+      _refreshSampler(),
     ]);
   }
 
@@ -225,6 +246,54 @@ class SettingsProvider extends ChangeNotifier {
       throw Exception(
           "${mode.toUpperCase()} backend isn't available on this device — using CPU instead.");
     }
+  }
+
+  Future<void> _refreshSampler() async {
+    try {
+      _temperature = await _channel.getTemperature();
+      _topK = await _channel.getTopK();
+      _topP = await _channel.getTopP();
+      _advancedMode = await _channel.getAdvancedMode();
+    } catch (_) {
+      // Keep defaults.
+    }
+    notifyListeners();
+  }
+
+  /// Drives the Creativity slider. Maps [0..1] onto temperature [0.1..1.2]
+  /// so the default "balanced" midpoint (0.5) produces temperature ≈ 0.65,
+  /// usable for both grammar correction (low) and brainstorming (high).
+  Future<void> setCreativity(double value) async {
+    final v = value.clamp(0.0, 1.0);
+    final temp = 0.1 + v * 1.1;
+    await setTemperature(temp);
+  }
+
+  Future<void> setTemperature(double value) async {
+    final v = value.clamp(0.0, 2.0);
+    await _channel.setTemperature(v);
+    _temperature = v;
+    notifyListeners();
+  }
+
+  Future<void> setTopK(int value) async {
+    final v = value.clamp(1, 100);
+    await _channel.setTopK(v);
+    _topK = v;
+    notifyListeners();
+  }
+
+  Future<void> setTopP(double value) async {
+    final v = value.clamp(0.0, 1.0);
+    await _channel.setTopP(v);
+    _topP = v;
+    notifyListeners();
+  }
+
+  Future<void> setAdvancedMode(bool enabled) async {
+    await _channel.setAdvancedMode(enabled);
+    _advancedMode = enabled;
+    notifyListeners();
   }
 
   @override

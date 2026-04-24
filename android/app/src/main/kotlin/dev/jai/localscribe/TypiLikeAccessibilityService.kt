@@ -114,8 +114,8 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private var overlayPreviewCard: View? = null
     private var overlayPreviewScroll: ScrollView? = null
     private var overlayPreviewText: TextView? = null
-    private var overlayPreviewCancel: Button? = null
-    private var overlayPreviewCopy: Button? = null
+    private var overlayPreviewCancel: ImageButton? = null
+    private var overlayPreviewCopy: ImageButton? = null
     private var overlayPreviewApply: Button? = null
 
     private var overlayContextBox: View? = null
@@ -226,18 +226,12 @@ class TypiLikeAccessibilityService : AccessibilityService() {
             }
 
             try {
-                if (parsed.before.trim().isEmpty()) {
-                    withContext(Dispatchers.Main) {
-                        val target = getFocusedEditableNode() ?: editable
-                        val cur = target.text?.toString().orEmpty()
-                        val cleaned = removeLastCommand(cur)
-                        if (cleaned != cur) {
-                            setNodeText(target, cleaned)
-                            lastAppliedHash = cleaned.hashCode()
-                        }
-                    }
-                    return@launch
-                }
+                // Empty-input is allowed: the user can type just `?summ` or
+                // `?ans what is 2+2` on its own and the model will operate on
+                // the (possibly empty) text plus whatever context/image they
+                // attach. Built-in tasks whose meaning depends on having some
+                // input text will simply receive an empty [TEXT] block, which
+                // the PromptBuilder emits consistently.
 
                 // Context UI (text + optional screenshot)
                 var contextText = ""
@@ -252,33 +246,38 @@ class TypiLikeAccessibilityService : AccessibilityService() {
                 }
 
                 val hasImage = contextImagePath != null
-                val finalPrompt = if (parsed.command == "scribe") {
-                    buildScribePrompt(parsed.before.trimEnd(), contextText, hasImage)
-                } else {
-                    val customTask = getCustomTaskIfAny(parsed.command)
-                    val task = customTask ?: mapCommandToTask(parsed.command, parsed.arg)
+                val customTask = getCustomTaskIfAny(parsed.command)
+                val isCustom = customTask != null
+                val kind = PromptBuilder.classify(parsed.command, isCustom)
+                // Built-in `rewrite` consumes its arg inside mapBuiltInTask; pass
+                // null for argForBuilder so we don't duplicate "Style modifier:".
+                val argForBuilder = if (!isCustom && parsed.command == "rewrite") null else parsed.arg
+                val task = customTask ?: PromptBuilder.mapBuiltInTask(parsed.command, parsed.arg)
+                val built = PromptBuilder.build(
+                    task = task,
+                    text = parsed.before.trimEnd(),
+                    context = contextText,
+                    arg = argForBuilder,
+                    hasImage = hasImage,
+                    kind = kind,
+                )
+                val finalPrompt = built.prompt
 
-                    // ✅ Tag-delimited input + JSON output requirement
-                    buildTaggedPrompt(
-                        task = task,
-                        text = parsed.before.trimEnd(),
-                        context = contextText,
-                        hasImage = hasImage,
-                    )
-                }
-
-                val isScribe = parsed.command == "scribe"
                 val timeoutMs = if (contextImagePath != null) 120_000L else 20_000L
-                val raw = withTimeout(timeoutMs) { generateAccordingToMode(finalPrompt, jsonMode = !isScribe, imagePath = contextImagePath) }
+                val raw = withTimeout(timeoutMs) { generateAccordingToMode(finalPrompt, jsonMode = built.jsonMode, imagePath = contextImagePath) }
 
-                val resultText = if (isScribe) {
-                    removeThinkOnly(raw).trim()
-                } else {
+                val resultText = if (built.jsonMode) {
                     postProcessOutput(raw) // extracts {"output": "..."} if possible
+                } else {
+                    removeThinkOnly(raw).trim()
                 }
 
                 if (resultText.isNotBlank()) {
-                    val newText = resultText + parsed.after
+                    // Drop parsed.after on purpose: the user asked for the
+                    // final field to contain ONLY the processed output, not
+                    // "<output> <text-after-keyword>". The text after the
+                    // keyword was just there to mark the input boundary.
+                    val newText = resultText
 
                     if (isShowPreviewEnabled()) {
                         val apply = awaitPreviewDecision(newText, editable, myGenId)
@@ -367,7 +366,9 @@ class TypiLikeAccessibilityService : AccessibilityService() {
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .unregisterOnSharedPreferenceChangeListener(prefsChangeListener)
         } catch (_: Exception) {}
-        try { llm?.close() } catch (_: Exception) {}
+        // The engine is now owned by [SharedLlm], not by this service — other
+        // surfaces (share popup, chat) may still be using it. Just drop our
+        // local reference; the holder lives for the app process.
         llm = null
         scope.cancel()
         try { llmInitExecutor.shutdown() } catch (_: Exception) {}
@@ -375,108 +376,13 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     }
 
     // ------------------------------------------------------------
-    // Prompt system (TAG-DELIMITED INPUT + JSON OUTPUT)
+    // Prompt system
     // ------------------------------------------------------------
+    // Prompt assembly lives in [PromptBuilder] (single source of truth shared
+    // with ProcessTextActivity). The only thing this class still owns is the
+    // custom-prompt lookup so it can decide whether to treat the keyword as
+    // built-in or user-defined.
 
-    private fun buildTaggedPrompt(task: String, text: String, context: String?, hasImage: Boolean = false): String {
-        val ctx = context?.trim().orEmpty()
-
-        val contextSection = when {
-            ctx.isNotBlank() -> """
-[CONTEXT]
-$ctx
-[/CONTEXT]"""
-            else -> ""
-        }
-
-        val imageSection = if (hasImage) """
-[IMAGE_CONTEXT]
-A screenshot is attached. Use it as visual reference to understand the subject matter, identify key details, and improve the quality of the output. The image and the text below refer to the same topic.
-[/IMAGE_CONTEXT]""" else ""
-
-        val rules = buildString {
-            appendLine("Keep the same language as the input unless the task says otherwise.")
-            appendLine("Keep the SAME point of view and pronouns (do NOT change I/you/She/He/they).")
-            appendLine("Preserve the original meaning and intent exactly.")
-            appendLine("Do not add new facts or remove unique details.")
-            appendLine("Keep names, numbers, dates and places unchanged.")
-            appendLine("Do not mention the task, rules, or context in the output.")
-            if (hasImage && ctx.isNotBlank())
-                appendLine("The screenshot and the context text together form the background — use both to inform the task.")
-            else if (hasImage)
-                appendLine("Use insights from the attached screenshot to inform the task.")
-            else if (ctx.isNotBlank())
-                appendLine("Use the provided context to inform the task.")
-            append("Output only the final answer (no explanations, no quotes, no formatting).")
-        }.trimEnd()
-
-        return """
-You are a writing engine.
-
-OUTPUT FORMAT (mandatory):
-Return ONLY valid JSON exactly like:
-{"output":"..."}
-No other keys. No extra text. No markdown.
-If you cannot comply, return: {"output":""}
-
-[TASK]
-$task
-[/TASK]
-$contextSection
-$imageSection
-[RULES]
-$rules
-[/RULES]
-
-[TEXT]
-$text
-[/TEXT]
-""".trimIndent()
-    }
-
-    private fun buildScribePrompt(text: String, context: String?, hasImage: Boolean = false): String {
-        val ctx = context?.trim().orEmpty()
-        val hasCtx = ctx.isNotBlank()
-
-        return buildString {
-            append("Respond in the same language as the input. Provide only the final answer. No explanations.")
-            if (hasCtx && hasImage) {
-                append(" The following context and the attached screenshot both provide background — use them together: \"$ctx\".")
-            } else if (hasCtx) {
-                append(" Use this context: \"$ctx\".")
-            } else if (hasImage) {
-                append(" An attached screenshot provides visual context — use it to inform your response.")
-            }
-            append(" Input: \"$text\"")
-        }
-    }
-
-    private fun mapCommandToTask(cmd: String, arg: String?): String {
-        return when (cmd) {
-            "fix" -> "Correct grammar, spelling, and punctuation in the same language."
-            "rewrite" -> {
-                when (arg?.lowercase()) {
-                    "formal" -> "Rewrite the text in a formal and professional tone in the same language."
-                    "friendly" -> "Rewrite the text in a friendly tone in the same language."
-                    "short" -> "Rewrite the text shorter while preserving meaning in the same language."
-                    else -> "Rewrite the text clearly while preserving meaning in the same language."
-                }
-            }
-            "polite" -> "Rewrite the text in a polite and professional tone in the same language."
-            "casual" -> "Rewrite the text in a casual and friendly tone in the same language."
-            "summ" -> "Summarize the text in one or two sentences in the same language."
-            "expand" -> "Expand the text with more detail while keeping the same language."
-            "translate" -> "Translate the text into English."
-            "bullet" -> "Convert the text into clear bullet points in the same language."
-            "improve" -> "Improve writing clarity and quality while keeping meaning and language the same."
-            "rephrase" -> "Rephrase the text completely while keeping the same meaning and language."
-            "formal" -> "Rewrite the text in a formal, professional tone in the same language."
-            else -> "Rewrite the text clearly while preserving meaning in the same language."
-        }
-    }
-
-    // Custom prompts support:
-    // - If user provided a custom prompt for cmd, use it as the TASK text in [TASK] ... [/TASK].
     private fun getCustomTaskIfAny(cmd: String): String? {
         val custom = getCustomPrompts()
         val customPrompt = custom.optString(cmd, "").trim()
@@ -584,11 +490,14 @@ $text
         ensurePromptFits(engine, prompt)
         Log.d("LocalScribe", "[Service] imagePath=$imagePath supportsVision=${engine.supportsVision}")
         if (imagePath != null && engine.supportsVision) {
-            // Downscale to cap vision-token count (LiteRT-LM patch limits) and reduce latency.
-            // 768 keeps patches well under the 2520 ceiling (~1400 patches for portrait shots)
-            // which roughly halves prefill time vs. 1024 and reduces the GPU-stall window
-            // that was causing UI animation stutter.
-            val bitmap = try { ImageUtils.decodeDownscaled(imagePath, 768) } catch (_: Exception) { null }
+            // Downscale aggressively to cap vision-token count. LiteRT-LM Gemma3
+            // tops out at 2520 patches; a 727x768 screenshot at 768 long-edge
+            // produces ~2160 patches, which prefills for >3s on mid-range
+            // devices and visibly stalls the UI thread during the overlay
+            // animation. 512 keeps portrait screenshots under ~900 patches
+            // (~2x faster) while remaining readable for text-extraction use
+            // cases that dominate the attach-screenshot flow.
+            val bitmap = try { ImageUtils.decodeDownscaled(imagePath, 512) } catch (_: Exception) { null }
             if (bitmap != null) {
                 try {
                     Log.d("LocalScribe", "[Service] Sending image (${bitmap.width}x${bitmap.height}) to LLM")
@@ -726,38 +635,42 @@ $text
     @Synchronized
     private fun ensureLlmReady(): LocalLlm? {
         val modelPath = getSavedModelPath()
-
-        if (!File(modelPath).exists()) {
-            Log.e("LocalScribe", "Model file not found: $modelPath")
-            llm = null
-            currentModelPath = null
-            return null
-        }
-
         val visionSupport = getModelVisionSupport(modelPath)
         val processingMode = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString("processing_mode", "cpu") ?: "cpu"
 
-        if (llm != null &&
-            currentModelPath == modelPath &&
-            currentVisionSupport == visionSupport &&
-            currentProcessingMode == processingMode
-        ) return llm
-
-        return try {
-            llm?.close()
-            Log.d("LocalScribe", "[Service] Rebuilding engine: vision=$visionSupport mode=$processingMode")
-            llm = LocalLlmFactory.create(applicationContext, modelPath, getMaxTokens(), visionSupport, processingMode)
-            currentModelPath = modelPath
-            currentVisionSupport = visionSupport
-            currentProcessingMode = processingMode
-            llm
-        } catch (e: Exception) {
-            Log.e("LocalScribe", "Failed to init LLM: ${e.message}", e)
-            llm = null
-            currentModelPath = null
-            null
-        }
+        // Delegate to the process-wide holder so that the share popup
+        // (ProcessTextActivity) and the chat screen (MainActivity) all share
+        // the same warm engine rather than cold-initing 2.6 GB of weights
+        // three times in the same process.
+        // Read the live sampler params the user committed via AI Settings.
+        // Passing SamplerParams() (defaults) here previously made SharedLlm
+        // cache a warm engine keyed on 0.3 / 40 / 0.9 forever, so Creativity
+        // edits were silently ignored by the accessibility pipeline.
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val sampler = SamplerParams(
+            temperature = prefs.getFloat("sampler_temperature", 0.3f),
+            topK = prefs.getInt("sampler_top_k", 40),
+            topP = prefs.getFloat("sampler_top_p", 0.9f),
+        )
+        val engine = SharedLlm.acquire(
+            applicationContext,
+            SharedLlm.Key(
+                modelPath = modelPath,
+                maxTokens = getMaxTokens(),
+                supportsVision = visionSupport,
+                processingMode = processingMode,
+                sampler = sampler,
+            ),
+        )
+        // Keep the legacy fields in sync so any call sites that still read
+        // them see the right values, even though the holder is now the
+        // source of truth.
+        llm = engine
+        currentModelPath = if (engine != null) modelPath else null
+        currentVisionSupport = visionSupport
+        currentProcessingMode = processingMode
+        return engine
     }
 
     /** Returns whether the user has indicated their model supports vision/image input. */
@@ -879,14 +792,15 @@ $text
         view.findViewById<View>(R.id.contextDivider1)?.setBackgroundColor(dividerColor)
         view.findViewById<View>(R.id.contextDivider2)?.setBackgroundColor(dividerColor)
 
-        // Ghost buttons
-        view.findViewById<Button>(R.id.btnPreviewCancel)?.apply {
+        // Ghost buttons (dark theme variant).
+        // Discard (bin) and Copy are now ImageButtons; only the background swap
+        // applies — icon tints stay as declared in the layout so the bin stays
+        // red in both themes.
+        view.findViewById<ImageButton>(R.id.btnPreviewCancel)?.apply {
             setBackgroundResource(R.drawable.ghost_rect_dark)
-            setTextColor(0xFF9B80E8.toInt())
         }
-        view.findViewById<Button>(R.id.btnPreviewCopy)?.apply {
+        view.findViewById<ImageButton>(R.id.btnPreviewCopy)?.apply {
             setBackgroundResource(R.drawable.ghost_rect_dark)
-            setTextColor(0xFF9B80E8.toInt())
         }
         view.findViewById<Button>(R.id.btnContextCancel)?.apply {
             setBackgroundResource(R.drawable.ghost_rect_dark)

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 class LlmChannelService {
   static const _channel = MethodChannel('local_llm');
   static const _progressChannel = EventChannel('local_llm_progress');
+  static const _generationChannel = EventChannel('local_llm_generation');
 
   // ── Model ──
 
@@ -174,6 +175,95 @@ class LlmChannelService {
 
   Future<String?> generate(String prompt) async {
     return _channel.invokeMethod<String>("generate", {"prompt": prompt});
+  }
+
+  /// Starts a streaming generation on the native side and returns a stream
+  /// that yields partial text chunks. The stream completes normally when the
+  /// engine reports "done", or errors when native reports a failure.
+  ///
+  /// Callers should subscribe *before* the underlying native call is issued —
+  /// [generateStream] wires the subscription first, then fires the start
+  /// request, so the first token can't be dropped on fast models.
+  Stream<String> generateStream(String prompt) {
+    final controller = StreamController<String>();
+    late StreamSubscription<dynamic> sub;
+    sub = _generationChannel.receiveBroadcastStream().listen(
+      (event) {
+        if (event is! Map) return;
+        if (event["token"] is String) {
+          controller.add(event["token"] as String);
+        } else if (event["done"] == true) {
+          controller.close();
+          sub.cancel();
+        } else if (event["error"] is String) {
+          controller.addError(event["error"] as String);
+          controller.close();
+          sub.cancel();
+        }
+      },
+      onError: (err, st) {
+        controller.addError(err, st);
+        controller.close();
+        sub.cancel();
+      },
+      cancelOnError: false,
+    );
+    // Kick off the native generation after the sink is wired. Ignore the
+    // Future result — progress comes back via the event channel.
+    _channel.invokeMethod<bool>("generateStream", {"prompt": prompt}).catchError((e) {
+      if (!controller.isClosed) {
+        controller.addError(e);
+        controller.close();
+      }
+      sub.cancel();
+      return null;
+    });
+    controller.onCancel = () async {
+      // If the Dart consumer cancels (e.g. chat screen disposed mid-stream),
+      // ask native to stop so we don't leak compute. cancelGenerate is a no-op
+      // when nothing is running.
+      try { await cancelGenerate(); } catch (_) {}
+      await sub.cancel();
+    };
+    return controller.stream;
+  }
+
+  /// Cancels the in-progress streaming generation, if any. Returns true if a
+  /// running generation was actually interrupted.
+  Future<bool> cancelGenerate() async {
+    final v = await _channel.invokeMethod<bool>("cancelGenerate");
+    return v == true;
+  }
+
+  // ── Sampler (creativity / advanced) ──
+
+  Future<double> getTemperature() async {
+    final v = await _channel.invokeMethod<double>("getTemperature");
+    return v ?? 0.3;
+  }
+  Future<void> setTemperature(double value) async {
+    await _channel.invokeMethod<bool>("setTemperature", {"value": value});
+  }
+  Future<int> getTopK() async {
+    final v = await _channel.invokeMethod<int>("getTopK");
+    return v ?? 40;
+  }
+  Future<void> setTopK(int value) async {
+    await _channel.invokeMethod<bool>("setTopK", {"value": value});
+  }
+  Future<double> getTopP() async {
+    final v = await _channel.invokeMethod<double>("getTopP");
+    return v ?? 0.9;
+  }
+  Future<void> setTopP(double value) async {
+    await _channel.invokeMethod<bool>("setTopP", {"value": value});
+  }
+  Future<bool> getAdvancedMode() async {
+    final v = await _channel.invokeMethod<bool>("getAdvancedMode");
+    return v == true;
+  }
+  Future<void> setAdvancedMode(bool enabled) async {
+    await _channel.invokeMethod<bool>("setAdvancedMode", {"enabled": enabled});
   }
 
   // ── Prompts ──

@@ -70,4 +70,7 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.core:core-ktx:1.13.1")
+    // Needed by ImageUtils to read JPEG/HEIC EXIF orientation and rotate
+    // user-captured screenshots/photos before handing them to the vision model.
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }
