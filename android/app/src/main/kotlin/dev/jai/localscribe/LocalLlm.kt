@@ -3,11 +3,6 @@ package dev.jai.localscribe
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
-import com.google.mediapipe.tasks.genai.llminference.LlmInference.Backend as MpBackend
-import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
-import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession.LlmInferenceSessionOptions
 import com.google.ai.edge.litertlm.Backend as LiteRtBackend
 import com.google.ai.edge.litertlm.Engine as LiteRtEngine
 import com.google.ai.edge.litertlm.EngineConfig as LiteRtEngineConfig
@@ -24,9 +19,19 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Sampler tuning knobs. Maps onto LiteRT-LM's [LiteRtSamplerConfig] and
- * partially onto MediaPipe's LlmInferenceOptions (MediaPipe exposes
- * temperature + topK; topP is ignored for .task models).
+ * LiteRT-LM error messages append a verbose "=== Source Location Trace ===" section
+ * to every exception. That section is useful in Logcat but clutters user-visible
+ * error messages. Strip it so only the human-readable first paragraph is shown.
+ *
+ * Mirrors cleanUpMediapipeTaskErrorMessage() from the Google AI Edge Gallery.
+ */
+internal fun cleanUpLiteRtErrorMessage(message: String): String {
+    val idx = message.indexOf("=== Source Location Trace")
+    return if (idx >= 0) message.substring(0, idx).trimEnd() else message
+}
+
+/**
+ * Sampler tuning knobs. Maps onto LiteRT-LM's [LiteRtSamplerConfig].
  *
  * Defaults are tuned for grammar / text-correction / prompt-suggestion:
  * low temperature keeps outputs deterministic. Chat-style exploration
@@ -41,7 +46,7 @@ data class SamplerParams(
 
 /**
  * Thin runtime-agnostic facade over on-device LLMs.
- * Supports MediaPipe `.task` bundles and LiteRT-LM `.litertlm` models.
+ * Supports LiteRT-LM `.litertlm` models.
  */
 interface LocalLlm {
     /** Whether this model instance supports multimodal (image) input. */
@@ -98,40 +103,29 @@ interface LocalLlm {
 }
 
 object LocalLlmFactory {
-    /** Substrings in model file names that imply vision / multimodal capability. */
-    private val VISION_KEYWORDS = listOf(
-        "gemma-3n", "gemma3n", "gemma-4n", "gemma4n",
-        "gemma-4", "gemma4",
-        "paligemma", "vision", "-mm-", "-it-vision", "multimodal"
-    )
-
-    /** Heuristically detect vision capability from the model file name. */
-    fun detectVisionCapability(modelPath: String): Boolean {
-        val name = File(modelPath).name.lowercase()
-        return VISION_KEYWORDS.any { name.contains(it) }
-    }
+    /** All .litertlm models support vision/image input by default. */
+    @Suppress("UNUSED_PARAMETER")
+    fun detectVisionCapability(modelPath: String): Boolean = true
 
     /**
      * Create a [LocalLlm] for the given model file.
-     * [supportsVision] defaults to the filename heuristic; callers can pass an explicit override
-     * from SharedPreferences when the user has toggled it manually.
+     * Only `.litertlm` models are supported. All models have [supportsVision] = true.
      */
     fun create(
         context: Context,
         modelPath: String,
         maxTokens: Int,
-        supportsVision: Boolean = detectVisionCapability(modelPath),
+        supportsVision: Boolean = true,
         processingMode: String = "cpu",
         sampler: SamplerParams = SamplerParams(),
     ): LocalLlm {
         val ext = File(modelPath).extension.lowercase()
-        return when (ext) {
-            "task" -> createMediaPipeWithFallback(context, modelPath, maxTokens, supportsVision, processingMode, sampler)
-            "litertlm" -> createLiteRtWithFallback(modelPath, maxTokens, supportsVision, processingMode, sampler)
-            else -> throw IllegalStateException(
-                "Unsupported model format: .$ext (expected .task or .litertlm)"
+        if (ext != "litertlm") {
+            throw IllegalStateException(
+                "Unsupported model format: .$ext (only .litertlm models are supported)"
             )
         }
+        return createLiteRtWithFallback(modelPath, maxTokens, supportsVision, processingMode, sampler)
     }
 
     /** GPU init can fail or hard-crash on some devices; transparently fall back to CPU. */
@@ -155,173 +149,6 @@ object LocalLlmFactory {
         }
         return LiteRtLmLocalLlm(modelPath, maxTokens, supportsVision, "cpu", sampler)
     }
-
-    private fun createMediaPipeWithFallback(
-        context: Context,
-        modelPath: String,
-        maxTokens: Int,
-        supportsVision: Boolean,
-        processingMode: String,
-        sampler: SamplerParams,
-    ): LocalLlm {
-        if (processingMode == "gpu") {
-            try {
-                return MediaPipeLocalLlm(context, modelPath, maxTokens, supportsVision, "gpu", sampler)
-            } catch (t: Throwable) {
-                Log.w(
-                    "LocalScribe",
-                    "MediaPipe GPU init failed (${t.message}); falling back to CPU.",
-                    t,
-                )
-            }
-        }
-        return MediaPipeLocalLlm(context, modelPath, maxTokens, supportsVision, "cpu", sampler)
-    }
-}
-
-private class MediaPipeLocalLlm(
-    context: Context,
-    modelPath: String,
-    maxTokens: Int,
-    override val supportsVision: Boolean,
-    processingMode: String = "cpu",
-    private val sampler: SamplerParams = SamplerParams(),
-) : LocalLlm {
-    override val activeBackend: String = processingMode
-
-    // Suppress further token callbacks when the user cancels. MediaPipe's async
-    // generation also exposes a real hard cancel via
-    // LlmInferenceSession.cancelGenerateResponseAsync() which we invoke below.
-    private val streamingActive = AtomicBoolean(false)
-
-    // The currently in-flight streaming session, retained only so [cancel]
-    // can call cancelGenerateResponseAsync() on it. Cleared when the stream
-    // completes (success, error, or user cancel).
-    @Volatile
-    private var activeSession: LlmInferenceSession? = null
-
-    private var engine: LlmInference? = run {
-        // tasks-genai 0.10.x moved setTemperature/setTopK/setTopP off
-        // LlmInferenceOptions onto LlmInferenceSessionOptions. We build
-        // the top-level engine without sampler tuning here and apply
-        // [sampler] by opening a fresh [LlmInferenceSession] around each
-        // generate() / generateStream() call (see [newSession]).
-        val builder = LlmInferenceOptions.builder()
-            .setModelPath(modelPath)
-            .setMaxTokens(maxTokens)
-        builder.setPreferredBackend(
-            if (processingMode == "gpu") MpBackend.GPU else MpBackend.CPU
-        )
-        LlmInference.createFromOptions(context.applicationContext, builder.build())
-    }
-
-    /**
-     * Builds a per-request [LlmInferenceSession] seeded with the user's
-     * current sampler knobs (temperature / topK / topP). Caller owns the
-     * session and must close it.
-     */
-    private fun newSession(): LlmInferenceSession {
-        val e = engine ?: throw IllegalStateException("MediaPipe LLM is closed")
-        Log.i(
-            "LocalScribe",
-            "[MediaPipe] Session sampler: topK=${sampler.topK} " +
-                "topP=${sampler.topP} temperature=${sampler.temperature}"
-        )
-        val opts = LlmInferenceSessionOptions.builder()
-            .setTemperature(sampler.temperature)
-            .setTopK(sampler.topK)
-            .setTopP(sampler.topP)
-            .build()
-        return LlmInferenceSession.createFromOptions(e, opts)
-    }
-
-    override fun generate(prompt: String): String {
-        val session = newSession()
-        return try {
-            session.addQueryChunk(prompt)
-            session.generateResponse()
-        } finally {
-            try { session.close() } catch (_: Exception) {}
-        }
-    }
-
-    /**
-     * MediaPipe .task multimodal inference requires the `tasks-vision` artifact
-     * which we don't ship. Fall back to text-only and warn loudly so the user
-     * can pick a LiteRT-LM model for vision.
-     */
-    override fun generate(prompt: String, images: List<Bitmap>): String {
-        if (images.isNotEmpty()) {
-            Log.w(
-                "LocalScribe",
-                "MediaPipe .task runtime does not support image input in this build; dropping ${images.size} image(s). Use a .litertlm model for multimodal.",
-            )
-        }
-        return generate(prompt)
-    }
-
-    override fun generateStream(
-        prompt: String,
-        onToken: (String) -> Unit,
-        onDone: () -> Unit,
-        onError: (Throwable) -> Unit,
-    ) {
-        val session = try {
-            newSession()
-        } catch (t: Throwable) {
-            onError(t); return
-        }
-        activeSession = session
-        streamingActive.set(true)
-        try {
-            session.addQueryChunk(prompt)
-            // tasks-genai 0.10.x streams deltas with a final `done` flag.
-            session.generateResponseAsync { partial, done ->
-                if (!streamingActive.get()) return@generateResponseAsync
-                if (!partial.isNullOrEmpty()) onToken(partial)
-                if (done) {
-                    streamingActive.set(false)
-                    activeSession = null
-                    try { session.close() } catch (_: Exception) {}
-                    onDone()
-                }
-            }
-        } catch (t: Throwable) {
-            streamingActive.set(false)
-            activeSession = null
-            try { session.close() } catch (_: Exception) {}
-            onError(t)
-        }
-    }
-
-    override fun cancel(): Boolean {
-        val wasActive = streamingActive.getAndSet(false)
-        val session = activeSession
-        activeSession = null
-        if (session != null) {
-            try { session.cancelGenerateResponseAsync() } catch (_: Exception) {}
-            try { session.close() } catch (_: Exception) {}
-        }
-        if (wasActive) Log.i("LocalScribe", "[MediaPipe] Generation cancelled")
-        return wasActive
-    }
-
-    override fun sizeInTokens(prompt: String): Int {
-        val e = engine ?: throw IllegalStateException("MediaPipe LLM is closed")
-        return e.sizeInTokens(prompt)
-    }
-
-    override fun close() {
-        streamingActive.set(false)
-        val session = activeSession
-        activeSession = null
-        if (session != null) {
-            try { session.cancelGenerateResponseAsync() } catch (_: Exception) {}
-            try { session.close() } catch (_: Exception) {}
-        }
-        try { engine?.close() } catch (_: Exception) {}
-        engine = null
-    }
 }
 
 private class LiteRtLmLocalLlm(
@@ -342,16 +169,27 @@ private class LiteRtLmLocalLlm(
 
     init {
         val backend = if (processingMode == "gpu") LiteRtBackend.GPU() else LiteRtBackend.CPU()
+        // Vision encoding always runs on CPU regardless of the main backend.
+        //
+        // Rationale: on GPU mode the main prefill/decode graph alone occupies ~2.26 GB of
+        // OpenCL memory (Gemma-4-E4B). The vision encoder is an additional 219 MB upload.
+        // On mid-range devices (Snapdragon 778G+, shared system/GPU RAM) uploading both
+        // simultaneously exhausts available memory and kills the process — the lost-device
+        // crash in logcat at "Replacing 2245 out of 2245 node(s) with delegate (LITERT_CL)"
+        // was caused by exactly this. The vision adapter already has section_backend_constraint=cpu
+        // baked into the model metadata, so only the encoder is relevant here.
+        // Keeping the encoder on CPU costs ~10–30 ms extra per image encode but prevents OOM.
+        val visionBackend = if (supportsVision) LiteRtBackend.CPU() else null
         Log.i(
             "LocalScribe",
             "[LiteRT] Initializing engine: backend=$processingMode, supportsVision=$supportsVision, " +
-                "visionBackend=${if (supportsVision) processingMode else "null (text-only)"}, " +
+                "visionBackend=${if (supportsVision) "cpu (always CPU to avoid GPU OOM)" else "null (text-only)"}, " +
                 "sampler=$sampler"
         )
         val config = LiteRtEngineConfig(
             modelPath = modelPath,
             backend = backend,
-            visionBackend = if (supportsVision) backend else null,
+            visionBackend = visionBackend,
             // maxNumTokens must be null — passing an explicit value triggers LiteRT-LM's
             // magic-number replacement which mismatches the RESHAPE op's output shape spec,
             // causing "num_input_elements != num_output_elements" at inference time.

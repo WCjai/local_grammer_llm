@@ -36,6 +36,8 @@ class _OnboardingScreenState extends State<OnboardingScreen>
   bool? _onboardApiValid;
   String? _onboardApiError;
   bool _onboardApiKeyVisible = false;
+  bool _geminiProceedAttempted = false;
+  bool _localProceedAttempted = false;
   StreamSubscription<dynamic>? _progressSub;
 
   // Page 2 – Accessibility
@@ -208,6 +210,22 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     }
   }
 
+  void _tryGeminiAdvance() {
+    if (_onboardApiValid == true) {
+      _onboardSaveAndAdvance();
+    } else {
+      setState(() => _geminiProceedAttempted = true);
+    }
+  }
+
+  void _tryLocalAdvance() {
+    if (_localModelReady) {
+      _localSetupAdvance();
+    } else {
+      setState(() => _localProceedAttempted = true);
+    }
+  }
+
   @override
   void dispose() {
     _progressSub?.cancel();
@@ -243,7 +261,6 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                     );
                   }),
                   const Spacer(),
-                  TextButton(onPressed: _skip, child: const Text("Skip")),
                 ],
               ),
             ),
@@ -383,7 +400,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           ]
         : _provider == "local"
         ? [
-            "Requires a .task or .litertlm model file (~1–4 GB)",
+            "Requires a .litertlm model file (~1–4 GB)",
             "Slower on older devices compared to cloud",
           ]
         : [
@@ -549,12 +566,24 @@ class _OnboardingScreenState extends State<OnboardingScreen>
             onChanged: (_) => setState(() {
               _onboardApiValid = null;
               _onboardApiError = null;
+              _geminiProceedAttempted = false;
             }),
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.key_outlined),
               hintText: "API Key",
               border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12)),
+              errorText: (_geminiProceedAttempted && _onboardApiValid != true)
+                  ? (_onboardApiKeyCtrl.text.trim().isEmpty
+                      ? "Enter your API key"
+                      : "Validate your API key to continue")
+                  : null,
+              errorBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: cs.error, width: 2)),
+              focusedErrorBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: cs.error, width: 2)),
               suffixIcon: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -660,21 +689,24 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                       ),
                     )),
                 const Divider(height: 20),
-                GestureDetector(
-                  onTap: () async {
-                    final uri = Uri.parse(
-                        'https://aistudio.google.com/apikey');
-                    if (await canLaunchUrl(uri)) {
-                      await launchUrl(uri,
-                          mode: LaunchMode.externalApplication);
-                    }
-                  },
-                  child: Text(
-                    "→ Open Google AI Studio",
-                    style: TextStyle(
-                        color: cs.primary,
-                        fontWeight: FontWeight.w500,
-                        decoration: TextDecoration.underline),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      final uri = Uri.parse(
+                          'https://aistudio.google.com/apikey');
+                      if (await canLaunchUrl(uri)) {
+                        await launchUrl(uri,
+                            mode: LaunchMode.externalApplication);
+                      }
+                    },
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: const Text("Open Google AI Studio"),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10)),
+                    ),
                   ),
                 ),
               ],
@@ -727,8 +759,8 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           const SizedBox(height: 24),
           _buildNavRow(cs,
               onBack: _goPrev,
-              onNext: _onboardApiValidating ? null : _onboardSaveAndAdvance,
-              nextLabel: "Get Started"),
+              onNext: (_onboardApiValidating || (_geminiProceedAttempted && _onboardApiValid != true)) ? null : _tryGeminiAdvance,
+              nextLabel: "Next"),
         ],
       ),
     );
@@ -743,27 +775,34 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ── Header ──────────────────────────────────────────────────
-          Text(
-            "LOCAL GEMMA MODEL",
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.4,
-              color: cs.primary,
-            ),
+          // Text(
+          //   "LOCAL GEMMA MODEL",
+          //   style: TextStyle(
+          //     fontSize: 13,
+          //     fontWeight: FontWeight.w700,
+          //     letterSpacing: 1.4,
+          //     color: cs.primary,
+          //   ),
+          // ),
+          // const SizedBox(height: 6),
+          
+          Row(
+            children: [
+              Icon(Icons.phone_android, size: 36, color: cs.primary),
+              const SizedBox(width: 12),
+              Text(
+                "Set Up On-Device AI",
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.bold,
+                  color: cs.onSurface,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 6),
           Text(
-            "Set Up On-Device AI",
-            style: TextStyle(
-              fontSize: 26,
-              fontWeight: FontWeight.bold,
-              color: cs.onSurface,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            "Download or select a local Gemma model file (.task or .litertlm) to process text entirely on your device — no internet needed.",
+            "Download or select a local Gemma model file (.litertlm) to process text entirely on your device — no internet needed.",
             style: TextStyle(color: cs.onSurface.withValues(alpha: 0.65), height: 1.4),
           ),
 
@@ -790,7 +829,12 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           Container(
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
-              border: Border.all(color: cs.outline.withValues(alpha: 0.5)),
+              border: Border.all(
+                color: (_localProceedAttempted && !_localModelReady)
+                    ? cs.error
+                    : cs.outline.withValues(alpha: 0.5),
+                width: (_localProceedAttempted && !_localModelReady) ? 2 : 1,
+              ),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Column(
@@ -806,7 +850,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  "Pick a .task or .litertlm file you downloaded manually.",
+                  "Pick a .litertlm file you downloaded manually.",
                   style: TextStyle(
                     fontSize: 13,
                     color: cs.onSurface.withValues(alpha: 0.6),
@@ -854,6 +898,19 @@ class _OnboardingScreenState extends State<OnboardingScreen>
               ],
             ),
           ),
+          if (_localProceedAttempted && !_localModelReady) ...[  
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.error_outline, color: cs.error, size: 16),
+                const SizedBox(width: 6),
+                Text(
+                  "Download or select a model file to continue",
+                  style: TextStyle(color: cs.error, fontSize: 13),
+                ),
+              ],
+            ),
+          ],
 
           const SizedBox(height: 12),
           Row(
@@ -903,8 +960,8 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           ],
           _buildNavRow(cs,
               onBack: _goPrev,
-              onNext: _downloadingModel ? null : _localSetupAdvance,
-              nextLabel: "Get Started"),
+              onNext: (_downloadingModel || (_localProceedAttempted && !_localModelReady)) ? null : _tryLocalAdvance,
+              nextLabel: "Next"),
         ],
       ),
     );
@@ -1026,39 +1083,88 @@ class _OnboardingScreenState extends State<OnboardingScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.select_all, size: 64, color: cs.primary),
-          const SizedBox(height: 24),
-          const Text(
-            "Highlight → Transform",
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            "Besides the ?fix commands, you can also highlight text in any app and choose Local Scribe from the context menu to transform it.\n\n"
-            "1. Select any text in any app.\n"
-            "2. Tap the ⋯ menu or \"Local Scribe\".\n"
-            "3. Choose a command from the popup sheet.",
-            textAlign: TextAlign.center,
-            style: TextStyle(
-                fontSize: 14,
-                color: cs.onSurface.withValues(alpha: 0.7),
-                height: 1.5),
+          Container(
+            width: 96,
+            height: 96,
+            decoration: BoxDecoration(
+              color: cs.primary.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.check_circle_outline, size: 56, color: cs.primary),
           ),
           const SizedBox(height: 28),
+          Text(
+            "You're All Set!",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 30,
+              fontWeight: FontWeight.bold,
+              color: cs.onSurface,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            "Local Scribe is ready to go.\nStart writing in any app and let AI do the heavy lifting.",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 16,
+              color: cs.onSurface.withValues(alpha: 0.65),
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 32),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Column(
+              children: [
+                _allSetTip(cs, Icons.auto_fix_high, "Type ?fix in any text field to correct grammar instantly."),
+                const SizedBox(height: 12),
+                _allSetTip(cs, Icons.text_fields, "Highlight text in any app and tap Local Scribe from the menu."),
+                const SizedBox(height: 12),
+                _allSetTip(cs, Icons.settings_outlined, "Customise commands and AI settings anytime."),
+              ],
+            ),
+          ),
+          const SizedBox(height: 36),
           SizedBox(
             width: double.infinity,
-            child: FilledButton(
+            child: FilledButton.icon(
               onPressed: _finishOnboarding,
+              icon: const Icon(Icons.rocket_launch_outlined),
+              label: const Text("Finish Setup"),
               style: FilledButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 textStyle: const TextStyle(
                     fontSize: 16, fontWeight: FontWeight.w600),
               ),
-              child: const Text("Finish Setup"),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _allSetTip(ColorScheme cs, IconData icon, String text) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 20, color: cs.primary),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 14,
+              color: cs.onSurface.withValues(alpha: 0.75),
+              height: 1.4,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

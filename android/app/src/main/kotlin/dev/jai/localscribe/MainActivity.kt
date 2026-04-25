@@ -880,7 +880,7 @@ class MainActivity : FlutterActivity() {
 
     private fun getShowPreview(): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SHOW_PREVIEW, false)
+        return prefs.getBoolean(KEY_SHOW_PREVIEW, true)
     }
 
     private fun saveShowPreview(enabled: Boolean) {
@@ -890,7 +890,7 @@ class MainActivity : FlutterActivity() {
 
     private fun getShowContext(): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SHOW_CONTEXT, false)
+        return prefs.getBoolean(KEY_SHOW_CONTEXT, true)
     }
 
     private fun saveShowContext(enabled: Boolean) {
@@ -997,13 +997,11 @@ class MainActivity : FlutterActivity() {
         return try {
             if (!File(path).exists()) return null
             llm?.close()
-            val visionSupport = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getBoolean("model_supports_vision", false)
             val engine = LocalLlmFactory.create(
                 applicationContext,
                 path,
                 getMaxTokens(),
-                visionSupport,
+                true,
                 getProcessingMode(),
                 sampler,
             )
@@ -1117,14 +1115,32 @@ class MainActivity : FlutterActivity() {
                         if (!completion.isCompleted) completion.complete(Unit)
                     },
                     onError = { t ->
+                        val cleanMsg = cleanUpLiteRtErrorMessage(t.message ?: "Generation failed")
+                        Log.w("LocalScribe", "[stream] Inference error: $cleanMsg", t)
                         runOnUiThread {
-                            generationSink?.success(mapOf("error" to (t.message ?: "Generation failed")))
+                            generationSink?.success(mapOf("error" to cleanMsg))
                         }
+                        // The engine may be in an undefined state after an inference error
+                        // (e.g. OOM, driver crash). Null it out so the next request triggers
+                        // a clean rebuild instead of re-hitting the same broken native session.
+                        val stale = llm
+                        llm = null
+                        currentModelPath = null
+                        currentSampler = null
+                        ioScope.launch { try { stale?.close() } catch (_: Exception) {} }
                         if (!completion.isCompleted) completion.complete(Unit)
                     },
                 )
             } catch (t: Throwable) {
-                emitGenerationError(t.message ?: "Generation failed")
+                val cleanMsg = cleanUpLiteRtErrorMessage(t.message ?: "Generation failed")
+                Log.w("LocalScribe", "[stream] Synchronous launch error: $cleanMsg", t)
+                emitGenerationError(cleanMsg)
+                // Same engine-invalidation as the async onError path.
+                val stale = llm
+                llm = null
+                currentModelPath = null
+                currentSampler = null
+                ioScope.launch { try { stale?.close() } catch (_: Exception) {} }
                 return
             }
             // Wait for either onDone or onError so we keep holding the mutex
@@ -1229,14 +1245,12 @@ class MainActivity : FlutterActivity() {
         }
         val displayName = getDisplayName(uri)
         val pathName = uri.path
-        val isTask = (displayName?.endsWith(".task", true) == true) ||
-                (displayName == null && pathName?.endsWith(".task", true) == true)
         val isLiteRt = (displayName?.endsWith(".litertlm", true) == true) ||
                 (displayName == null && pathName?.endsWith(".litertlm", true) == true)
 
-        if (!isTask && !isLiteRt) {
+        if (!isLiteRt) {
             emitProgress(1.0, true)
-            result.error("BAD_TYPE", "Please select a .task or .litertlm file", null)
+            result.error("BAD_TYPE", "Please select a .litertlm file", null)
             return
         }
         ioScope.launch {
@@ -1306,13 +1320,13 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun sanitizeModelName(displayName: String?): String {
-        val raw = (displayName ?: "model.task").trim()
+        val raw = (displayName ?: "model.litertlm").trim()
         val name = raw.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val lower = name.lowercase()
-        return if (lower.endsWith(".task") || lower.endsWith(".litertlm")) {
+        return if (lower.endsWith(".litertlm")) {
             name
         } else {
-            "${name}.task"
+            "${name}.litertlm"
         }
     }
 

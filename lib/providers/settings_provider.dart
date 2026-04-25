@@ -25,8 +25,8 @@ class SettingsProvider extends ChangeNotifier {
   bool _apiKeyVisible = false;
   final apiKeyCtrl = TextEditingController();
 
-  bool _showPreview = false;
-  bool _showContext = false;
+  bool _showPreview = true;
+  bool _showContext = true;
   bool _modelSupportsVision = false;
   String _processingMode = "cpu";
 
@@ -104,7 +104,7 @@ class SettingsProvider extends ChangeNotifier {
     try {
       _showPreview = await _channel.getShowPreview();
     } catch (_) {
-      _showPreview = false;
+      _showPreview = true;
     }
     notifyListeners();
   }
@@ -113,7 +113,7 @@ class SettingsProvider extends ChangeNotifier {
     try {
       _showContext = await _channel.getShowContext();
     } catch (_) {
-      _showContext = false;
+      _showContext = true;
     }
     notifyListeners();
   }

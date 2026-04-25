@@ -108,7 +108,7 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
   final _contextCtrl = TextEditingController();
   final _inputScrollCtrl = ScrollController();
   String? _attachedImagePath;
-  bool _modelSupportsVision = false;
+  bool _modelSupportsVision = true;
   bool _capturingScreenshot = false;
 
   @override
@@ -138,7 +138,7 @@ class _ProcessTextScreenState extends State<ProcessTextScreen>
     try {
       final data = await _channel.getProcessTextData();
       final prompts = await _channel.getPrompts();
-      bool supportsVision = false;
+      bool supportsVision = true;
       try { supportsVision = await _channel.getModelSupportsVision(); } catch (_) {}
       if (!mounted) return;
       setState(() {

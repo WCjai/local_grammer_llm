@@ -90,7 +90,7 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     /** Gemini API models that don't accept images natively; auto-promote to gemini-2.5-flash for multimodal. */
     private val NON_VISION_GEMINI_MODELS = setOf("gemma-3n-e2b-it", "gemma-3n-e4b-it")
 
-    private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.task"
+    private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.litertlm"
     private val DEFAULT_API_MODE = "local"
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
     private val DEFAULT_MAX_TOKENS = 512
@@ -116,7 +116,7 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private var overlayPreviewText: TextView? = null
     private var overlayPreviewCancel: ImageButton? = null
     private var overlayPreviewCopy: ImageButton? = null
-    private var overlayPreviewApply: Button? = null
+    private var overlayPreviewApply: ImageButton? = null
 
     private var overlayContextBox: View? = null
     private var overlayContextCard: View? = null
@@ -673,20 +673,18 @@ class TypiLikeAccessibilityService : AccessibilityService() {
         return engine
     }
 
-    /** Returns whether the user has indicated their model supports vision/image input. */
-    private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean {
-        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
-    }
+    /** All models support vision/image input by default. */
+    private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean = true
 
     /**
      * Returns true if the "Attach Screenshot" button should be enabled.
      * Requires API 30+. In local-only mode, also requires the loaded model to support vision.
      */
     private fun isAttachVisionEnabled(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
+        // All .litertlm models support vision by default. The only real
+        // constraint is the Android API level: screenshot capture via
+        // AccessibilityService.takeScreenshot() requires Android 11+ (API 30).
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     }
 
     // ------------------------------------------------------------
@@ -1289,12 +1287,12 @@ class TypiLikeAccessibilityService : AccessibilityService() {
 
     private fun isShowPreviewEnabled(): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SHOW_PREVIEW, false)
+        return prefs.getBoolean(KEY_SHOW_PREVIEW, true)
     }
 
     private fun isShowContextEnabled(): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SHOW_CONTEXT, false)
+        return prefs.getBoolean(KEY_SHOW_CONTEXT, true)
     }
 
     private fun getApiMode(): String {

@@ -263,7 +263,7 @@ class ModelDownloadService : Service() {
 
     private fun sanitizeName(name: String): String {
         val safe = name.trim().replace(Regex("[^A-Za-z0-9._-]"), "_")
-        return if (safe.lowercase().endsWith(".task") || safe.lowercase().endsWith(".litertlm")) safe
+        return if (safe.lowercase().endsWith(".litertlm")) safe
         else "${safe}.litertlm"
     }
 }

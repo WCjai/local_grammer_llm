@@ -19,7 +19,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
   final _channel = LlmChannelService();
   bool _downloadingModel = false;
   bool _switchingMode = false;
-  bool _togglingVision = false;
+  bool _changingModel = false;
 
   // Pending sampler edits. Writing to the MethodChannel on every slider
   // frame stalls the drag on mid-range devices, so we hold edits locally
@@ -43,18 +43,6 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
       _showNotice("$e");
     } finally {
       if (mounted) setState(() => _switchingMode = false);
-    }
-  }
-
-  Future<void> _toggleVisionSupport(SettingsProvider settings, bool v) async {
-    if (_togglingVision) return;
-    setState(() => _togglingVision = true);
-    try {
-      await settings.setModelSupportsVision(v);
-    } catch (e) {
-      _showNotice("Error: $e");
-    } finally {
-      if (mounted) setState(() => _togglingVision = false);
     }
   }
 
@@ -341,7 +329,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
             ),
             const SizedBox(height: 6),
             Text(
-              "Download or select a local Gemma model file (.litertlm or .task) to use for on-device AI processing. Downloaded models are saved to the app's private storage.",
+              "Download or select a local Gemma model file (.litertlm) to use for on-device AI processing. Downloaded models are saved to the app's private storage.",
               style: theme.textTheme.bodySmall?.copyWith(
                 color: cs.onSurface.withValues(alpha: 0.65),
                 height: 1.4,
@@ -496,6 +484,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                 ],
               ),
               const SizedBox(height: 10),
+              if (settings.processingMode == "gpu")
               Container(
                 padding: const EdgeInsets.symmetric(
                     horizontal: 12, vertical: 10),
@@ -525,37 +514,6 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
               ),
               const SizedBox(height: 20),
 
-              // ── Image input support (moved inside the local-model card so
-              //     every Gemma-specific control lives in one section) ──
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                decoration: BoxDecoration(
-                  color: cs.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border:
-                      Border.all(color: cs.outline.withValues(alpha: 0.3)),
-                ),
-                child: SwitchListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text("Image input support"),
-                  subtitle: Text(
-                    _togglingVision
-                        ? "Rebuilding engine…"
-                        : "Enable only if your local model accepts image input.",
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: cs.onSurface.withValues(alpha: 0.5),
-                    ),
-                  ),
-                  value: settings.modelSupportsVision,
-                  onChanged: (busy || !isLocal || _togglingVision)
-                      ? null
-                      : (v) => _toggleVisionSupport(settings, v),
-                ),
-              ),
-              const SizedBox(height: 14),
-
               // ── Creativity + advanced sampler (also moved inside) ──
               _creativityCard(theme, cs, settings, !busy && isLocal),
               const SizedBox(height: 20),
@@ -565,14 +523,24 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: (busy || !isLocal)
+                      onPressed: (busy || !isLocal || _changingModel)
                           ? null
                           : () async {
-                              final msg = await model.pickModel();
-                              if (msg != null) _showNotice(msg);
+                              setState(() => _changingModel = true);
+                              try {
+                                final msg = await model.pickModel();
+                                if (msg != null) _showNotice(msg);
+                              } finally {
+                                if (mounted) setState(() => _changingModel = false);
+                              }
                             },
-                      icon: const Icon(Icons.folder_open_outlined, size: 18),
-                      label: const Text("Change Model"),
+                      icon: _changingModel
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.folder_open_outlined, size: 18),
+                      label: Text(_changingModel ? "Changing…" : "Change Model"),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(

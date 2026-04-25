@@ -148,15 +148,17 @@
                 android:paddingBottom="14dp"
                 android:orientation="horizontal">
 
-                <!-- Discard sits at the far left. Icon-only (trash, red). -->
+                <!-- Discard — pill-shaped icon button (trash, red). -->
                 <ImageButton
                     android:id="@+id/btnPreviewCancel"
-                    android:layout_width="44dp"
+                    android:layout_width="wrap_content"
                     android:layout_height="44dp"
                     android:src="@drawable/ic_trash"
                     android:tint="#E53935"
                     android:background="@drawable/ghost_rect"
                     android:scaleType="centerInside"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
                     android:contentDescription="Discard" />
 
                 <!-- Spacer pushes Copy + Apply to the right edge. -->
@@ -165,30 +167,32 @@
                     android:layout_height="0dp"
                     android:layout_weight="1" />
 
+                <!-- Copy — pill-shaped icon button. -->
                 <ImageButton
                     android:id="@+id/btnPreviewCopy"
-                    android:layout_width="44dp"
+                    android:layout_width="wrap_content"
                     android:layout_height="44dp"
                     android:src="@drawable/ic_content_copy"
                     android:tint="#6C3FC5"
                     android:background="@drawable/ghost_rect"
                     android:scaleType="centerInside"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
                     android:contentDescription="Copy to clipboard" />
 
-                <Button
+                <!-- Apply — pill-shaped icon-only button (check mark). -->
+                <ImageButton
                     android:id="@+id/btnPreviewApply"
                     android:layout_width="wrap_content"
                     android:layout_height="44dp"
-                    android:minWidth="96dp"
                     android:layout_marginStart="10dp"
-                    android:text="Apply"
-                    android:textAllCaps="false"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
+                    android:src="@drawable/ic_check"
+                    android:tint="#FFFFFF"
                     android:background="@drawable/apply_rect"
-                    android:textColor="#FFFFFF"
-                    android:paddingStart="20dp"
-                    android:paddingEnd="20dp" />
+                    android:scaleType="centerInside"
+                    android:paddingStart="22dp"
+                    android:paddingEnd="22dp"
+                    android:contentDescription="Apply" />
             </LinearLayout>
 
         </LinearLayout>

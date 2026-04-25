@@ -41,7 +41,7 @@ class ProcessTextActivity : FlutterActivity() {
     private val KEY_MAX_TOKENS = "max_tokens"
     private val KEY_OUTPUT_TOKENS = "output_tokens"
 
-    private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.task"
+    private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.litertlm"
     private val DEFAULT_API_MODE = "local"
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
     private val DEFAULT_MAX_TOKENS = 512
@@ -114,7 +114,7 @@ class ProcessTextActivity : FlutterActivity() {
 
                     "getModelSupportsVision" -> {
                         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        result.success(prefs.getBoolean(KEY_MODEL_SUPPORTS_VISION, false))
+                        result.success(prefs.getBoolean(KEY_MODEL_SUPPORTS_VISION, true))
                     }
 
                     "captureScreenshot" -> {
@@ -534,10 +534,7 @@ class ProcessTextActivity : FlutterActivity() {
         return engine
     }
 
-    private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean {
-        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_MODEL_SUPPORTS_VISION, false)
-    }
+    private fun getModelVisionSupport(@Suppress("UNUSED_PARAMETER") modelPath: String): Boolean = true
 
     // ---- SharedPreferences helpers ----
 
@@ -548,12 +545,12 @@ class ProcessTextActivity : FlutterActivity() {
 
     private fun getShowPreview(): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SHOW_PREVIEW, false)
+        return prefs.getBoolean(KEY_SHOW_PREVIEW, true)
     }
 
     private fun getShowContext(): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_SHOW_CONTEXT, false)
+        return prefs.getBoolean(KEY_SHOW_CONTEXT, true)
     }
 
     private fun getApiMode(): String {

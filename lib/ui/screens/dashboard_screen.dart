@@ -476,7 +476,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               ),
               const SizedBox(height: 24),
               Text(
-                "Loading AI Modelâ€¦",
+                "Loading AI Provider...",
                 style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,

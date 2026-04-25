@@ -93,6 +93,18 @@ class ModelProvider extends ChangeNotifier {
     _modelName = "";
     notifyListeners();
 
+    // Delete the existing model file before picking a new one so storage
+    // isn't wasted holding both files simultaneously.
+    if (_hasModel) {
+      try {
+        await _channel.deleteModel();
+      } catch (_) {
+        // Deletion failure is non-fatal — proceed with pick.
+      }
+      _hasModel = false;
+      notifyListeners();
+    }
+
     String? message;
     try {
       final path = await _channel.pickModel();
