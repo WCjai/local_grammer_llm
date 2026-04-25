@@ -187,13 +187,13 @@ class _OnboardingScreenState extends State<OnboardingScreen>
 
   Future<void> _onboardSaveAndAdvance() async {
     if (_provider == "both") {
-      // Gemini slide for "both" — validate key then advance to local slide
       final key = _onboardApiKeyCtrl.text.trim();
-      if (key.isNotEmpty) {
-        await _onboardValidateCloud();
-        // Always advance even if validation fails — local model is the fallback
+      if (key.isEmpty) {
+        setState(() => _geminiProceedAttempted = true);
+        return;
       }
-      if (mounted) _goNext();
+      await _onboardValidateCloud();
+      if (mounted && _onboardApiValid == true) _goNext();
       return;
     }
     final key = _onboardApiKeyCtrl.text.trim();
@@ -211,10 +211,10 @@ class _OnboardingScreenState extends State<OnboardingScreen>
   }
 
   void _tryGeminiAdvance() {
-    if (_onboardApiValid == true) {
-      _onboardSaveAndAdvance();
-    } else {
+    if (_onboardApiKeyCtrl.text.trim().isEmpty) {
       setState(() => _geminiProceedAttempted = true);
+    } else {
+      _onboardSaveAndAdvance();
     }
   }
 
@@ -759,7 +759,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           const SizedBox(height: 24),
           _buildNavRow(cs,
               onBack: _goPrev,
-              onNext: (_onboardApiValidating || (_geminiProceedAttempted && _onboardApiValid != true)) ? null : _tryGeminiAdvance,
+              onNext: _onboardApiValidating ? null : _tryGeminiAdvance,
               nextLabel: "Next"),
         ],
       ),
