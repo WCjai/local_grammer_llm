@@ -44,16 +44,33 @@ class _ChatScreenState extends State<ChatScreen> {
   String _buildPrompt(String userInput) {
     final req = _sanitizeUserRequest(userInput);
     final reserved = _reservedKeywords.join(", ");
+
     return """
-You generate custom commands (keywords) and prompts for a local writing assistant app.
+You are an expert prompt engineer. Your job is to create high-quality, detailed, production-ready instruction prompts for a local AI writing assistant app.
+
 Return ONLY valid JSON. No markdown, no code fences, no extra text.
+Reserved keywords (must NOT use as keyword): $reserved
 
-Reserved keywords (must NOT use): $reserved
+Read the user request carefully and generate the number of suggestions they asked for (e.g. "a single prompt" = 1, "20 prompts" = 20). If no count is specified, generate 3 to 5. Maximum 20. Minimum 1.
 
-Generate 3 to 5 suggestions. Each suggestion MUST follow:
-- keyword: 3-20 chars, lowercase, only letters/numbers/underscore (regex: ^[a-z0-9_]{3,20}\$), unique, not reserved
-- label: 2-5 words, UI friendly, no punctuation
-- prompt: clear and detailed instruction string that includes {text}, does NOT mention JSON/tags/system/AI, ends with "Return only the result." without "\\n"
+Each suggestion MUST follow these rules:
+
+keyword:
+- 3-20 chars, lowercase letters/numbers/underscore only (regex: ^[a-z0-9_]{3,20}\$)
+- Unique, not reserved, descriptive of the task
+
+label:
+- 2-5 words, Title Case, no punctuation, UI-friendly name for the command
+
+prompt (most important — make it high quality):
+- MUST contain the placeholder {text} exactly once — this is where the user's input goes
+- Be specific and detailed: spell out exactly what the AI should do, how, and in what format
+- Include tone, style, structure, or formatting guidance where relevant
+- Anticipate edge cases: e.g. if translating, specify to preserve meaning and tone
+- If the task has multiple steps or outputs, describe the order and format clearly
+- Do NOT be vague. Bad: "Improve {text}." Good: "Rewrite {text} to be clearer and more concise while preserving the original meaning. Fix grammar, remove redundancy, and use plain language. Return only the improved text."
+- Does NOT mention JSON, system prompts, AI models, or internal tags
+- Must end with exactly: "Return only the result."
 
 User request: $req
 

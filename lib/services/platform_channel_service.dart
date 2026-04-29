@@ -128,15 +128,6 @@ class LlmChannelService {
     await _channel.invokeMethod<bool>("setMaxTokens", {"value": value});
   }
 
-  Future<int> getOutputTokens() async {
-    final v = await _channel.invokeMethod<int>("getOutputTokens");
-    return v ?? 128;
-  }
-
-  Future<void> setOutputTokens(int value) async {
-    await _channel.invokeMethod<bool>("setOutputTokens", {"value": value});
-  }
-
   // ── Vision ──
 
   Future<bool> getModelSupportsVision() async {

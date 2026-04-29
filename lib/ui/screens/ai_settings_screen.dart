@@ -30,6 +30,7 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
   double? _pendingTemp;
   int? _pendingTopK;
   double? _pendingTopP;
+  int? _pendingMaxTokens;
   bool _advancedExpanded = false;
   bool _applyingSampler = false;
 
@@ -781,11 +782,13 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
     final temp = _pendingTemp ?? settings.temperature;
     final topK = _pendingTopK ?? settings.topK;
     final topP = _pendingTopP ?? settings.topP;
+    final maxTokens = _pendingMaxTokens ?? settings.maxTokens;
 
     final dirty = _pendingCreativity != null ||
         _pendingTemp != null ||
         _pendingTopK != null ||
-        _pendingTopP != null;
+        _pendingTopP != null ||
+        _pendingMaxTokens != null;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -909,6 +912,31 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
                   enabled: enabled,
                   onChanged: (v) => setState(() => _pendingTopP = v),
                 ),
+                const SizedBox(height: 12),
+                const Divider(height: 1),
+                const SizedBox(height: 12),
+                _advSlider(
+                  theme: theme,
+                  label: "Max context tokens",
+                  value: maxTokens.toDouble(),
+                  min: 512,
+                  max: 8192,
+                  divisions: 30,
+                  display: "$maxTokens",
+                  enabled: enabled,
+                  onChanged: (v) => setState(() {
+                    _pendingMaxTokens = (v.round() ~/ 256) * 256;
+                  }),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 2, bottom: 4),
+                  child: Text(
+                    "Total context window the model allocates. Higher = longer inputs, more RAM.",
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.onSurface.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -985,12 +1013,14 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
       await settings.setTemperature(0.3);
       await settings.setTopK(40);
       await settings.setTopP(0.9);
+      await settings.setMaxTokens(2048);
       if (!mounted) return;
       setState(() {
         _pendingCreativity = null;
         _pendingTemp = null;
         _pendingTopK = null;
         _pendingTopP = null;
+        _pendingMaxTokens = null;
       });
       _showNotice("Sampler reset to model defaults ✓");
     } catch (e) {
@@ -1018,12 +1048,16 @@ class _AiSettingsScreenState extends State<AiSettingsScreen> {
       if (_pendingTopP != null) {
         await settings.setTopP(_pendingTopP!);
       }
+      if (_pendingMaxTokens != null) {
+        await settings.setMaxTokens(_pendingMaxTokens!);
+      }
       if (!mounted) return;
       setState(() {
         _pendingCreativity = null;
         _pendingTemp = null;
         _pendingTopK = null;
         _pendingTopP = null;
+        _pendingMaxTokens = null;
       });
       _showNotice("Sampler updated ✓");
     } catch (e) {

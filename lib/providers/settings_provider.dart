@@ -30,8 +30,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _modelSupportsVision = false;
   String _processingMode = "cpu";
 
-  int _maxTokens = 512;
-  int _outputTokens = 128;
+  int _maxTokens = 2048;
 
   // Sampler knobs. Defaults tuned for grammar / correction workloads; the
   // Creativity slider in AI Settings remaps [0..1] onto temperature [0.1..1.2]
@@ -52,7 +51,6 @@ class SettingsProvider extends ChangeNotifier {
   bool get modelSupportsVision => _modelSupportsVision;
   String get processingMode => _processingMode;
   int get maxTokens => _maxTokens;
-  int get outputTokens => _outputTokens;
   double get temperature => _temperature;
   int get topK => _topK;
   double get topP => _topP;
@@ -121,7 +119,6 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> _refreshTokens() async {
     try {
       _maxTokens = await _channel.getMaxTokens();
-      _outputTokens = await _channel.getOutputTokens();
     } catch (_) {
       // keep defaults
     }
@@ -200,16 +197,6 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> setMaxTokens(int value) async {
     await _channel.setMaxTokens(value);
     _maxTokens = value;
-    if (_outputTokens >= value) {
-      _outputTokens = (value ~/ 4).clamp(64, 512);
-      await _channel.setOutputTokens(_outputTokens);
-    }
-    notifyListeners();
-  }
-
-  Future<void> setOutputTokens(int value) async {
-    await _channel.setOutputTokens(value);
-    _outputTokens = value;
     notifyListeners();
   }
 

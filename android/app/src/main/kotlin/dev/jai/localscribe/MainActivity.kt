@@ -60,7 +60,6 @@ class MainActivity : FlutterActivity() {
     private val KEY_API_KEY = "api_key"
     private val KEY_API_MODEL = "api_model"
     private val KEY_MAX_TOKENS = "max_tokens"
-    private val KEY_OUTPUT_TOKENS = "output_tokens"
     private val KEY_TEMPERATURE = "sampler_temperature"
     private val KEY_TOP_K = "sampler_top_k"
     private val KEY_TOP_P = "sampler_top_p"
@@ -68,8 +67,7 @@ class MainActivity : FlutterActivity() {
     private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.task"
     private val DEFAULT_API_MODE = "local"
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
-    private val DEFAULT_MAX_TOKENS = 512
-    private val DEFAULT_OUTPUT_TOKENS = 128
+    private val DEFAULT_MAX_TOKENS = 2048
     private val DEFAULT_TEMPERATURE = 0.3f
     private val DEFAULT_TOP_K = 40
     private val DEFAULT_TOP_P = 0.9f
@@ -492,20 +490,6 @@ class MainActivity : FlutterActivity() {
                             return@setMethodCallHandler
                         }
                         saveMaxTokens(value)
-                        result.success(true)
-                    }
-
-                    "getOutputTokens" -> {
-                        result.success(getOutputTokens())
-                    }
-
-                    "setOutputTokens" -> {
-                        val value = call.argument<Int>("value")
-                        if (value == null) {
-                            result.error("BAD_ARGS", "value is required", null)
-                            return@setMethodCallHandler
-                        }
-                        saveOutputTokens(value)
                         result.success(true)
                     }
 
@@ -938,16 +922,6 @@ class MainActivity : FlutterActivity() {
         prefs.edit().putInt(KEY_MAX_TOKENS, value).apply()
     }
 
-    private fun getOutputTokens(): Int {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getInt(KEY_OUTPUT_TOKENS, DEFAULT_OUTPUT_TOKENS)
-    }
-
-    private fun saveOutputTokens(value: Int) {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putInt(KEY_OUTPUT_TOKENS, value).apply()
-    }
-
     private fun isInternetAvailable(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val network = cm.activeNetwork ?: return false
@@ -971,12 +945,12 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun ensurePromptFits(engine: LocalLlm, prompt: String) {
-        val maxInputTokens = (getMaxTokens() - getOutputTokens()).coerceAtLeast(1)
+        val maxTokens = getMaxTokens()
         val tokens = engine.sizeInTokens(prompt)
-        if (tokens <= maxInputTokens) return
+        if (tokens <= maxTokens) return
         throw IllegalStateException(
-            "Input too long for model (tokens=$tokens, maxInput=$maxInputTokens). " +
-                "Shorten the input or use a model with a higher token limit."
+            "Input too long for model (tokens=$tokens, maxTokens=$maxTokens). " +
+                "Increase Max context tokens in AI Settings or use a model with a higher context limit."
         )
     }
 

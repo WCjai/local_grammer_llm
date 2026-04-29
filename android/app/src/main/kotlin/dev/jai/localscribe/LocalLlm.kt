@@ -153,7 +153,7 @@ object LocalLlmFactory {
 
 private class LiteRtLmLocalLlm(
     modelPath: String,
-    @Suppress("UNUSED_PARAMETER") maxTokens: Int,
+    private val maxTokens: Int,
     override val supportsVision: Boolean,
     processingMode: String = "cpu",
     private val sampler: SamplerParams = SamplerParams(),
@@ -210,7 +210,7 @@ private class LiteRtLmLocalLlm(
         Log.i(
             "LocalScribe",
             "[LiteRT] Conversation sampler: topK=${sampler.topK} " +
-                "topP=${sampler.topP} temperature=${sampler.temperature}"
+                "topP=${sampler.topP} temperature=${sampler.temperature} maxTokens=$maxTokens"
         )
         return LiteRtConversationConfig(
             samplerConfig = LiteRtSamplerConfig(

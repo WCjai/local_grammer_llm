@@ -39,13 +39,11 @@ class ProcessTextActivity : FlutterActivity() {
     private val KEY_API_KEY = "api_key"
     private val KEY_API_MODEL = "api_model"
     private val KEY_MAX_TOKENS = "max_tokens"
-    private val KEY_OUTPUT_TOKENS = "output_tokens"
 
     private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.litertlm"
     private val DEFAULT_API_MODE = "local"
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
-    private val DEFAULT_MAX_TOKENS = 512
-    private val DEFAULT_OUTPUT_TOKENS = 128
+    private val DEFAULT_MAX_TOKENS = 2048
     private val KEY_MODEL_SUPPORTS_VISION = "model_supports_vision"
     private val NON_VISION_GEMINI_MODELS = setOf("gemma-3n-e2b-it", "gemma-3n-e4b-it")
     private val CROP_SCREENSHOT_REQUEST = 7021
@@ -376,11 +374,12 @@ class ProcessTextActivity : FlutterActivity() {
     private fun generateLocal(prompt: String): String {
         val engine = ensureLlmReady()
             ?: throw IllegalStateException("LLM not ready. Pick a model first.")
-        val maxInputTokens = (getMaxTokens() - getOutputTokens()).coerceAtLeast(1)
+        val maxTokens = getMaxTokens()
         val tokens = engine.sizeInTokens(prompt)
-        if (tokens > maxInputTokens) {
+        if (tokens > maxTokens) {
             throw IllegalStateException(
-                "Input too long for model (tokens=$tokens, maxInput=$maxInputTokens)"
+                "Input too long for model (tokens=$tokens, maxTokens=$maxTokens). " +
+                    "Increase Max context tokens in AI Settings or use a model with a higher context limit."
             )
         }
         return engine.generate(prompt)
@@ -571,11 +570,6 @@ class ProcessTextActivity : FlutterActivity() {
     private fun getMaxTokens(): Int {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return prefs.getInt(KEY_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-    }
-
-    private fun getOutputTokens(): Int {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getInt(KEY_OUTPUT_TOKENS, DEFAULT_OUTPUT_TOKENS)
     }
 
     private fun isInternetAvailable(): Boolean {

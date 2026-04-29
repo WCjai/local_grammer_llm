@@ -93,8 +93,7 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private val DEFAULT_MODEL_PATH = "/data/local/tmp/llm/model.litertlm"
     private val DEFAULT_API_MODE = "local"
     private val DEFAULT_API_MODEL = "gemini-2.5-flash"
-    private val DEFAULT_MAX_TOKENS = 512
-    private val DEFAULT_OUTPUT_TOKENS = 128
+    private val DEFAULT_MAX_TOKENS = 2048
 
     private var currentModelPath: String? = null
     private var currentVisionSupport: Boolean = false
@@ -515,12 +514,12 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     }
 
     private fun ensurePromptFits(engine: LocalLlm, prompt: String) {
-        val maxInputTokens = (getMaxTokens() - getOutputTokens()).coerceAtLeast(1)
+        val maxTokens = getMaxTokens()
         val tokens = engine.sizeInTokens(prompt)
-        if (tokens <= maxInputTokens) return
+        if (tokens <= maxTokens) return
         throw IllegalStateException(
-            "Input too long for model (tokens=$tokens, maxInput=$maxInputTokens). " +
-                "Shorten the input or use a model with a higher token limit."
+            "Input too long for model (tokens=$tokens, maxInput=$maxTokens). " +
+                "Increase Max context tokens in AI Settings or use a model with a higher context limit."
         )
     }
 
@@ -1313,11 +1312,6 @@ class TypiLikeAccessibilityService : AccessibilityService() {
     private fun getMaxTokens(): Int {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return prefs.getInt(KEY_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-    }
-
-    private fun getOutputTokens(): Int {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getInt(KEY_OUTPUT_TOKENS, DEFAULT_OUTPUT_TOKENS)
     }
 
     private fun isInternetAvailable(): Boolean {
